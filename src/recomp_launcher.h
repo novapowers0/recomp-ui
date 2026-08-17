@@ -459,6 +459,11 @@ struct RecompLauncherCSettings {
     // independent of aspect/widescreen: it describes physical host windows,
     // not how a game's camera is rendered inside one of them.
     int display_layout;
+
+    // ---- MP2K audio shadow (GameInfo.has_audio_shadow games) ---------------
+    // Appended additively. 1 = use the runtime's verified MP2K enhancement
+    // mixer instead of the raw hardware Direct-Sound mix (see [audio].shadow).
+    int audio_shadow;
 };
 
 // ---- host verification/inspection results (filled by the callbacks below) ----
@@ -749,6 +754,32 @@ typedef struct RecompLauncherCGameInfo {
      * NULL/0 keeps every existing single-display launcher unchanged. */
     const char* const* display_layout_labels;
     int num_display_layouts;
+
+    /* MP2K audio shadow (GBA): 1 adds an "MP2K audio shadow" checkbox to
+     * Audio settings. The host maps Settings.audio_shadow onto its verified
+     * enhancement mixer ([audio].shadow). Off by default; only games that
+     * actually link Nintendo's MP2K driver see an audible difference. */
+    int has_audio_shadow;
+
+    /* ---- per-dump presentation + per-language boot ROMs -------------------
+     * Optional, appended additively (zero-initialized consumers unchanged).
+     *
+     * known_rom_regions / known_rom_boxarts are parallel to known_sha1_hex:
+     * the region label and box-art override shown when the picked cart matches
+     * that SHA-1 (NULL/"" = the game defaults from `region` / `boxart_path`).
+     * This lets a translation dump display e.g. "USA + Mod SPA" with its own
+     * cover while staying byte-compatible at runtime.
+     *
+     * language_labels (above) selects the boot dump: language_rom_paths[i] is
+     * the absolute path to the cart for that language and
+     * language_rom_sha1_index[i] the known_sha1_hex entry it must match
+     * (used to sync the language selection to whatever cart is actually
+     * present). Empty/absent paths leave the user's picked ROM untouched. */
+    const char* const* known_rom_regions;
+    const char* const* known_rom_boxarts;
+    const char* const* language_rom_paths;
+    int  num_language_rom_paths;
+    const int* language_rom_sha1_index;
 } RecompLauncherCGameInfo;
 
 // Returns: 0 = LAUNCH (boot out_rom_path with the edited *io),

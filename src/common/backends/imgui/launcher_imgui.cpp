@@ -90,6 +90,10 @@ extern "C" const char* launcher_backend_name(void) { return "Dear ImGui"; }
 // The theme pointer is set once per launcher run and read every frame, so the
 // volatile access cost is irrelevant.
 const LauncherTheme* volatile g_th = nullptr;
+// UI localization: 0 = English (default), 1 = Spanish. Mirrors the committed
+// language index (s.language_index) so toggling EN/ES also translates the
+// launcher itself, not just the boot ROM.
+int g_ui_lang = 0;
 
 namespace {
 
@@ -390,7 +394,69 @@ bool neon_cta(const char* id, const char* label, ImVec2 size, bool enabled = tru
 
 // Uppercase section eyebrow with letter-spacing + a short accent tick, e.g.
 //   ▎ CONTROLLERS   — encodes "this is a section header", arcade panel style.
+// UI localization: maps English labels to Spanish when g_ui_lang == 1 (ES).
+// Falls back to the original string for anything not covered.
+const char* tr_ui(const char* en) {
+    if (g_ui_lang != 1 || !en) return en;
+    struct Pair { const char* en; const char* es; };
+    static const Pair kEs[] = {
+        {"Settings", "Ajustes"},
+        {"< Back", "< Atr\u00e1s"},
+        {"Mods", "Mods"},
+        {"PLAY", "JUGAR"},
+        {"NETPLAY", "NETPLAY"},
+        {"SAVES", "PARTIDAS"},
+        {"DISPLAY", "PANTALLA"},
+        {"AUDIO", "AUDIO"},
+        {"LOCALIZATION", "LOCALIZACI\u00d3N"},
+        {"Language", "Idioma"},
+        {"SYSTEM", "SISTEMA"},
+        {"SOLAR SENSOR", "SENSOR SOLAR"},
+        {"HOTKEYS", "ATAJOS"},
+        {"MOUSE", "RAT\u00d3N"},
+        {"MOTION", "MOVIMIENTO"},
+        {"Window scale", "Escala de ventana"},
+        {"Fullscreen", "Pantalla completa"},
+        {"Screen layout", "Dise\u00f1o de pantalla"},
+        {"Integer scaling", "Escalado entero"},
+        {"Scaling filter", "Filtro de escalado"},
+        {"Linear filtering", "Filtrado lineal"},
+        {"Affine background smoothing", "Suavizado de fondos afines"},
+        {"View mode", "Modo de vista"},
+        {"Extra cells / side", "Celdas extra / lado"},
+        {"Window size", "Tama\u00f1o de ventana"},
+        {"Renderer", "Renderizador"},
+        {"Supersampling", "Supersampling"},
+        {"Texture filtering", "Filtrado de textura"},
+        {"Antialiasing", "Antialiasing"},
+        {"Screen model", "Modelo de pantalla"},
+        {"Frame interpolation", "Interpolaci\u00f3n de fotogramas"},
+        {"Presentation target", "Objetivo de presentaci\u00f3n"},
+        {"Skip FMVs", "Omitir FMVs"},
+        {"Turbo loads", "Cargas turbo"},
+        {"Sample rate", "Frecuencia de muestreo"},
+        {"Volume", "Volumen"},
+        {"Output device", "Dispositivo de salida"},
+        {"High-quality SPU", "SPU de alta calidad"},
+        {"MP2K audio shadow", "Sombra de audio MP2K"},
+        {"BIOS", "BIOS"},
+        {"Light source", "Fuente de luz"},
+        {"Level", "Nivel"},
+        {"Postal code", "C\u00f3digo postal"},
+        {"Country", "Pa\u00eds"},
+        {"Full sun", "Sol pleno"},
+        {"Input source", "Fuente de entrada"},
+        {"Deadzone", "Zona muerta"},
+        {"Sensitivity", "Sensibilidad"},
+        {"Gyro sensitivity", "Sensibilidad del giroscopio"},
+    };
+    for (const Pair& p : kEs)
+        if (std::strcmp(p.en, en) == 0) return p.es;
+    return en;
+}
+
 void eyebrow_tracked(const char* s) {
+    s = tr_ui(s);
     const LauncherTheme& th = *g_th;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -548,6 +614,7 @@ void ws_cells_stepper(const char* id, LauncherModel* m, int* out_delta) {
 // the controls up into a clean grid. col_w == 0 keeps the legacy flow layout
 // (control hugs the label with a fixed gap).
 void row_label(const char* text, const LauncherTheme& th, float col_w = 0.0f) {
+    text = tr_ui(text);
     float x0 = ImGui::GetCursorPosX();
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(col(th.text_muted), "%s", text);
@@ -2050,6 +2117,7 @@ void draw_audio_controls(LauncherModel* m, const LauncherTheme& th) {
     // and the SPU toggle all share the same left edge (aligned grid).
     float cw = ImGui::CalcTextSize("Sample rate").x;
     if (m->has_spu_hq) { float t = ImGui::CalcTextSize("High-quality SPU").x; if (t > cw) cw = t; }
+    if (m->has_audio_shadow) { float t = ImGui::CalcTextSize("MP2K audio shadow").x; if (t > cw) cw = t; }
     cw += px(18.0f);
     // Sample rate: hidden for consoles whose runtime has no audio-frequency
     // setting (SystemProfile.hide_audio_freq — NES has Volume only).
@@ -2086,6 +2154,25 @@ void draw_audio_controls(LauncherModel* m, const LauncherTheme& th) {
         row_label("High-quality SPU", th, cw);
         bool hq = m->s.spu_hq != 0;
         if (ImGui::Checkbox("##spuhq", &hq)) launcher_model_toggle_spu_hq(m);
+    }
+
+    // GBA MP2K enhancement mixer: opt-in verified HLE shadow. Only games that
+    // link Nintendo's MP2K driver hear a difference; the setting is persisted
+    // and passed to the runtime as [audio].shadow.
+    if (m->has_audio_shadow) {
+        row_label("MP2K audio shadow", th, cw);
+        bool as = m->s.audio_shadow != 0;
+        if (ImGui::Checkbox("##audioshadow", &as)) launcher_model_toggle_audio_shadow(m);
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(px(360));
+            ImGui::TextUnformatted(
+                "Use the runtime's verified MP2K enhancement mixer instead of "
+                "the raw hardware mix. Only affects games that use Nintendo's "
+                "MP2K sound driver.");
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
     }
 
     // NOTE: analog deadzone is NOT here — it belongs to the input device, so it
@@ -2140,7 +2227,7 @@ void draw_audio_controls(LauncherModel* m, const LauncherTheme& th) {
 // panel_video_draw, decided from the same "deep" predicate draw_settings used
 // to compute inline.
 void panel_audio_draw(LauncherModel* m, const LauncherTheme* th) {
-    const bool deep_audio = m->has_spu_hq || m->num_languages > 0 || m->num_audio_devices > 0;   /* deadzone moved to controller card */
+    const bool deep_audio = m->has_spu_hq || m->has_audio_shadow || m->num_languages > 0 || m->num_audio_devices > 0;   /* deadzone moved to controller card */
     if (deep_audio) {
         if (begin_panel("audio", 0, false)) draw_audio_controls(m, *th);
         end_panel();
@@ -2437,7 +2524,7 @@ void draw_settings(LauncherModel* m, const LauncherTheme& th) {
                                       // filter/widescreen on the legacy surface)
 
     const bool deep_display = video_card_grows(m);   // superset of any_deep_display: folds in NES + widescreen (N64 covered too)
-    const bool deep_audio   = m->has_spu_hq || m->num_languages > 0 || m->num_audio_devices > 0;   /* deadzone moved to controller card */
+    const bool deep_audio   = m->has_spu_hq || m->has_audio_shadow || m->num_languages > 0 || m->num_audio_devices > 0;   /* deadzone moved to controller card */
 
     const LauncherPanel* video_p   = find_composed(prof->panels_settings, "video", m);
     const LauncherPanel* audio_p   = find_composed(prof->panels_settings, "audio", m);
@@ -5131,14 +5218,14 @@ void draw_footer(LauncherModel* m, const LauncherTheme& th, float footer_h) {
     if (m->view == LNG_VIEW_DASHBOARD && m->netplay_supported) {
         const float net_w = px(170.0f);
         ImGui::SetCursorScreenPos(ImVec2(play_x - net_w - px(12.0f), cta_y));
-        if (ImGui::Button("NETPLAY", ImVec2(net_w, play_h))) {
+        if (ImGui::Button(tr_ui("NETPLAY"), ImVec2(net_w, play_h))) {
             np_connect_and_list(m);
             launcher_model_set_view(m, LNG_VIEW_NETPLAY);
         }
     }
     ImGui::SetCursorScreenPos(ImVec2(play_x, cta_y));
     const bool can_play = launcher_model_can_launch(m);
-    if (neon_cta("##play", "PLAY", ImVec2(play_w, play_h), can_play)) {
+    if (neon_cta("##play", tr_ui("PLAY"), ImVec2(play_w, play_h), can_play)) {
         if (mod_commit_launch(m))
             m->action = LNG_ACTION_LAUNCH;
     } else if (!can_play && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -5381,6 +5468,8 @@ void draw_skip_modal(LauncherModel* m) {
 }
 
 void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logical_h) {
+    // Localize the launcher UI to match the committed boot language (ES = index 1).
+    g_ui_lang = (m->num_languages > 1 && m->s.language_index == 1) ? 1 : 0;
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
@@ -5447,7 +5536,7 @@ void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logic
         }
     ImGui::EndGroup();
     {   // right-aligned netplay name + nav buttons
-        const char* label = (m->view == LNG_VIEW_DASHBOARD) ? "Settings" : "< Back";
+        const char* label = tr_ui((m->view == LNG_VIEW_DASHBOARD) ? "Settings" : "< Back");
         const float w = px(110.0f);
         const float gap = px(10.0f);
         const float name_w = px(170.0f);
@@ -5463,8 +5552,37 @@ void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logic
             }
         }
         if (m->view == LNG_VIEW_DASHBOARD && m->mods) {
-            ImGui::SetCursorPos(ImVec2(right - w * 2.0f - gap, nav_y));
-            if (ImGui::Button("Mods", ImVec2(w, px(34))))
+            // Language segmented control (EN/ES) sits immediately LEFT of
+            // Mods, sharing its top edge and height so the two read as one
+            // button group: [EN][ES][Mods] right-aligned before Settings/Back.
+            // Using SameLine keeps every segment on the same baseline instead
+            // of scattering them with absolute SetCursorPos.
+            const float lg = px(4.0f);
+            if (m->num_languages > 1) {
+                const float seg_w = px(36.0f);
+                ImGui::SetCursorPos(ImVec2(
+                    right - w * 2.0f - gap - (seg_w * 2.0f + lg), nav_y));
+                for (int L = 0; L < m->num_languages; ++L) {
+                    if (L) ImGui::SameLine(0, lg);
+                    const char* lbl = (m->language_labels && m->language_labels[L])
+                                          ? m->language_labels[L] : "?";
+                    const bool sel = m->s.language_index == L;
+                    ImGui::PushID(5000 + L);
+                    ImGui::PushStyleColor(ImGuiCol_Button,
+                                          sel ? col(th.accent) : col(th.control));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                          sel ? col(th.accent) : col(th.control_hovered));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, col(th.accent));
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          sel ? col(th.accent_text) : col(th.text));
+                    if (ImGui::Button(lbl, ImVec2(seg_w, px(34))))
+                        launcher_model_set_language(m, L);
+                    ImGui::PopStyleColor(4);
+                    ImGui::PopID();
+                }
+                ImGui::SameLine(0, lg);
+            }
+            if (ImGui::Button(tr_ui("Mods"), ImVec2(w, px(34))))
                 launcher_model_set_view(m, LNG_VIEW_MODS);
         }
         ImGui::SetCursorPos(ImVec2(right - w, nav_y));
@@ -5871,6 +5989,21 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
         }
         ImGui::NewFrame();
         draw_ui(m, *th, p->logical_w, p->logical_h);
+        // Reload box art when the path changes (e.g. EN <-> ES language
+        // switch).  The initial load happens once before the loop; without
+        // this check the texture stays stale across dump/language swaps.
+        {
+            static const char* prev_boxart = nullptr;
+            if (m->boxart_path != prev_boxart) {
+                if (g_boxart.id) launcher_texture_free(&g_boxart);
+                g_boxart = launcher_texture_load(
+                    asset(m->boxart_path && m->boxart_path[0]
+                              ? m->boxart_path
+                              : "assets/img/boxart.tga")
+                        .c_str());
+                prev_boxart = m->boxart_path;
+            }
+        }
         ImGui::Render();
 
         glViewport(0, 0, p->pixel_w, p->pixel_h);

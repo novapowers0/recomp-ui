@@ -256,7 +256,15 @@ typedef struct {
     bool     has_screen_kind;
     bool     has_frame_interp;
     bool     has_spu_hq;
+    bool     has_audio_shadow;   // GBA MP2K enhancement-mixer checkbox
     bool     has_skip_fmv;
+    // Per-dump presentation + per-language boot ROMs (borrowed from GameInfo).
+    const char* const* known_rom_regions;    // parallel to known_sha1_hex
+    const char* const* known_rom_boxarts;    // parallel to known_sha1_hex
+    const char* const* language_rom_paths;   // per-language absolute cart path
+    int      num_language_rom_paths;
+    const int* language_rom_sha1_index;      // known_sha1 index per language
+    int      sha1_index;                     // matched known_sha1 index, -1 none
     bool     has_turbo_loads;
     // (no has_fullscreen_toggle: the Fullscreen row is universal — every
     // console draws it; the ABI flag of that name is deprecated/ignored.)
@@ -440,7 +448,7 @@ const char* launcher_model_aspect_label(const LauncherModel* m);  // "4:3 (Nativ
 bool launcher_model_aspect_offered(const LauncherModel* m, int index);  // 0=4:3,1=16:9,2=21:9
 
 // ---- audio settings ----
-void launcher_model_cycle_freq(LauncherModel* m);    // 32000/44100/48000
+void launcher_model_cycle_freq(LauncherModel* m);    // 32768/32040/32000/44100/48000
 void launcher_model_volume_delta(LauncherModel* m, int delta);  // clamp 0..100
 
 // ---- deeper PSX-style settings (capability-gated; no-op / harmless when the
@@ -462,12 +470,14 @@ void launcher_model_toggle_frame_interp(LauncherModel* m);
 void launcher_model_cycle_interp_fps(LauncherModel* m);        // {0,90,120,144,165,240} wrap
 const char* launcher_model_interp_fps_label(const LauncherModel* m);  // "Display refresh"/"90 fps"
 void launcher_model_toggle_spu_hq(LauncherModel* m);
+void launcher_model_toggle_audio_shadow(LauncherModel* m);
 void launcher_model_toggle_skip_fmv(LauncherModel* m);
 void launcher_model_toggle_turbo_loads(LauncherModel* m);
 void launcher_model_cycle_fullscreen(LauncherModel* m);        // Off -> Borderless -> Exclusive, wraps
 const char* launcher_model_fullscreen_label(const LauncherModel* m);  // "Off"/"Borderless"/"Exclusive"
 void launcher_model_toggle_fullscreen(LauncherModel* m);       // binary on/off; kept for bool-style hosts
 void launcher_model_cycle_language(LauncherModel* m);          // wraps over num_languages
+void launcher_model_set_language(LauncherModel* m, int index); // sets + applies boot ROM
 const char* launcher_model_language_label(const LauncherModel* m);
 void launcher_model_cycle_deadzone_pct(LauncherModel* m);      // 0..50 step 5, wraps; mirrors both players
 const char* launcher_model_deadzone_pct_label(const LauncherModel* m);  // "37%"

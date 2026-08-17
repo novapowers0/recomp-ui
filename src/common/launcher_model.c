@@ -24,7 +24,10 @@
 
 // 32040 = the SNES S-DSP's native output rate; kept reachable in the cycle so
 // users chasing bit-exact SNES audio can pick it (matches the legacy launcher).
-static const int kFreqTable[] = { 32040, 32000, 44100, 48000 };
+// The GBA mixer is natively 32768 Hz; that rate resamples 1:1 and is the
+// cleanest choice. Higher rates resample (artifacts/crackle); 32040 is the
+// legacy retroarch default.
+static const int kFreqTable[] = { 32768, 32040, 32000, 44100, 48000 };
 static const int kFreqCount   = (int)(sizeof(kFreqTable) / sizeof(kFreqTable[0]));
 
 static const int kWindowWidths[]    = { 960, 1280, 1600, 1920 };
@@ -103,6 +106,12 @@ void launcher_model_init(LauncherModel* m,
         m->known_sha1_hex       = game->known_sha1_hex;
         m->num_known_sha1       = game->num_known_sha1;
         m->num_known_sha256     = game->num_known_sha256;
+        m->known_rom_regions    = game->known_rom_regions;
+        m->known_rom_boxarts    = game->known_rom_boxarts;
+        m->language_rom_paths   = game->language_rom_paths;
+        m->num_language_rom_paths = game->num_language_rom_paths;
+        m->language_rom_sha1_index = game->language_rom_sha1_index;
+        m->sha1_index           = -1;
 
         m->pad_mode_supported   = game->pad_mode_supported != 0;
         m->pad_mode_selectable  = game->pad_mode_selectable != 0;
@@ -119,6 +128,7 @@ void launcher_model_init(LauncherModel* m,
         m->has_screen_kind      = game->has_screen_kind != 0;
         m->has_frame_interp     = game->has_frame_interp != 0;
         m->has_spu_hq           = game->has_spu_hq != 0;
+        m->has_audio_shadow     = game->has_audio_shadow != 0;
         m->has_skip_fmv         = game->has_skip_fmv != 0;
         m->has_turbo_loads      = game->has_turbo_loads != 0;
         // game->has_fullscreen_toggle is deliberately NOT read: the Fullscreen
@@ -443,6 +453,7 @@ void launcher_model_set_rom(LauncherModel* m, const char* path) {
     m->crc_match = false;
     m->sha_match = false;
     m->sha1_match = false;
+    m->sha1_index = -1;
     const int disc_verify = m->profile && m->profile->verify.mode == 1;
     if (m->rom_present) {
         FILE* f = fopen(m->rom_full, "rb");
@@ -485,6 +496,7 @@ void launcher_model_set_rom(LauncherModel* m, const char* path) {
                                 }
                                 if (eq && want[40] == '\0') {
                                     m->sha1_match = true;
+                                    m->sha1_index = (int)k;
                                     break;
                                 }
                             }
@@ -500,6 +512,26 @@ void launcher_model_set_rom(LauncherModel* m, const char* path) {
 
     run_verify(m);
     update_msu1_patch_available(m);
+
+    /* Per-dump presentation: the matched known_sha1 entry can override the
+     * region label and the box-art (e.g. a Spanish translation dump shows
+     * "USA + Mod SPA" and its own cover). Also sync the language selector to
+     * whichever dump is actually mounted. */
+    if (m->sha1_index >= 0) {
+        const int idx = m->sha1_index;
+        if (m->known_rom_regions && m->known_rom_regions[idx] &&
+            m->known_rom_regions[idx][0])
+            m->region = m->known_rom_regions[idx];
+        if (m->known_rom_boxarts && m->known_rom_boxarts[idx] &&
+            m->known_rom_boxarts[idx][0])
+            m->boxart_path = m->known_rom_boxarts[idx];
+        if (m->language_rom_sha1_index)
+            for (int L = 0; L < m->num_languages; ++L)
+                if (m->language_rom_sha1_index[L] == idx) {
+                    m->s.language_index = L;
+                    break;
+                }
+    }
 }
 
 // Disc-verdict (verify.mode==1 systems, e.g. PSX): run the SystemProfile's
@@ -891,6 +923,10 @@ void launcher_model_toggle_spu_hq(LauncherModel* m) {
     m->s.spu_hq = !m->s.spu_hq;
 }
 
+void launcher_model_toggle_audio_shadow(LauncherModel* m) {
+    m->s.audio_shadow = !m->s.audio_shadow;
+}
+
 void launcher_model_toggle_skip_fmv(LauncherModel* m) {
     m->s.auto_skip_fmv = !m->s.auto_skip_fmv;
 }
@@ -920,7 +956,21 @@ void launcher_model_toggle_fullscreen(LauncherModel* m) {
 
 void launcher_model_cycle_language(LauncherModel* m) {
     if (m->num_languages <= 0) return;
-    m->s.language_index = (m->s.language_index + 1) % m->num_languages;
+    int next = (m->s.language_index + 1) % m->num_languages;
+    launcher_model_set_language(m, next);
+}
+
+void launcher_model_set_language(LauncherModel* m, int index) {
+    if (m->num_languages <= 0) return;
+    m->s.language_index = clampi(index, 0, m->num_languages - 1);
+    // Each language maps to its own cart dump. Mount it so the region label,
+    // box-art and SHA-1 verification all reflect the dump that will actually
+    // boot. Re-mounting the same path is a cheap no-op hashing pass.
+    if (m->num_language_rom_paths > 0 && m->language_rom_paths) {
+        const int i = clampi(m->s.language_index, 0, m->num_language_rom_paths - 1);
+        const char* path = m->language_rom_paths[i];
+        if (path && path[0]) launcher_model_set_rom(m, path);
+    }
 }
 
 const char* launcher_model_language_label(const LauncherModel* m) {

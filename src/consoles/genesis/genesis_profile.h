@@ -81,7 +81,7 @@ static const SystemProfile kSystemProfileGenesis = {
     /* controller */ {
         kGenesisPadButtons, LNG_GENESIS_PAD_BUTTON_COUNT,
         "pad_genesis.tga", NULL, NULL,   // single pad art; no analog/digital swap pair
-        /* max_players */ 2, /* has_pad_mode */ 1,
+        /* max_players */ 4, /* has_pad_mode */ 1,   // 4 logical players (RUI_GEN_MAX_PLAYERS); game num_players may be lower
         /* binds_per_input */ 1,       // one key bind per input (the GAMEPAD chip is a separate pad bind)
         kGenesisPadModes, LNG_GENESIS_PAD_MODE_COUNT,
         /* has_pad_binds */ 1,
@@ -127,10 +127,9 @@ static inline void launcher_profile_apply_genesis(RecompLauncherCGameInfo* gi) {
     gi->rom_noun = "ROM";
     // 3-Button/6-Button pad-mode selector (per player, engine PadType values).
     // The custom mode list lives on the SystemProfile row; these ABI flags
-    // just switch the selector on. allow_hybrid is a PSX-only concept.
+    // just switch the selector on.
     gi->pad_mode_supported  = 1;
     gi->pad_mode_selectable = 1;
-    gi->allow_hybrid        = 0;
     // Widescreen defaults ON at the console level (every shipped Genesis
     // recomp exposes the experimental 16:9 path); a per-game host overrides
     // to 0 when its layout isn't widescreen-capable (g_game_layout.ws_capable).

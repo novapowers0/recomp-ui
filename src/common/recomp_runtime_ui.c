@@ -37,10 +37,157 @@ const RecompRuntimeUiItem *recomp_runtime_ui_section_item(
     return NULL;
 }
 
+/* Every status write withdraws a pending confirmation: its prompt is gone. */
+static void show_status(RecompRuntimeUi *ui, const char *text, unsigned frames) {
+    snprintf(ui->status, sizeof(ui->status), "%s", text);
+    ui->status_frames = ui->status[0] ? frames : 0;
+    ui->confirm_item = NULL;
+}
+
+/* ---- nested pages -------------------------------------------------------- */
+
+/* An item's page path; NULL for a malformed one (a leading or trailing '/' or
+ * an empty component such as "A//B"), which is left out of the menu entirely
+ * rather than producing an unnamed or unreachable row. */
+static const char *item_path(const RecompRuntimeUiItem *item) {
+    const char *path = item->section && *item->section ? item->section : "Settings";
+    if (*path == '/') return NULL;
+    for (const char *p = path; *p; ++p)
+        if (*p == '/' && (p[1] == '/' || p[1] == '\0')) return NULL;
+    return path;
+}
+
+static size_t first_component_len(const char *path) {
+    const char *slash = strchr(path, '/');
+    return slash ? (size_t)(slash - path) : strlen(path);
+}
+
+/* Full path of the open page: "<section>" or "<section>/<page>". */
+static void open_page_path(const RecompRuntimeUi *ui, char *out, size_t size) {
+    if (!ui->page[0]) snprintf(out, size, "%s", ui->sections[ui->section_index]);
+    else snprintf(out, size, "%s/%s", ui->sections[ui->section_index], ui->page);
+}
+
+/* 1: path is the page itself. 2: path is below it (*rest = what follows the
+ * page and its '/'). 0: unrelated. */
+static int path_relation(const char *path, const char *page, const char **rest) {
+    if (!path) return 0;
+    const size_t n = strlen(page);
+    if (strncmp(path, page, n) != 0) return 0;
+    if (path[n] == '\0') return 1;
+    if (path[n] == '/' && path[n + 1]) { *rest = path + n + 1; return 2; }
+    return 0;
+}
+
+/* Walk the open page's rows in order. Returns the row count, or stops at
+ * `want` and fills item/folder for it. */
+static size_t page_walk(const RecompRuntimeUi *ui, size_t want,
+                        const RecompRuntimeUiItem **item_out,
+                        const char **folder_out, size_t *folder_len_out) {
+    char page[256];
+    size_t row = 0;
+    if (!ui || ui->section_index >= ui->section_count) return 0;
+    open_page_path(ui, page, sizeof(page));
+    for (size_t i = 0; i < ui->config.item_count; ++i) {
+        const char *rest = NULL;
+        const int rel = path_relation(item_path(&ui->config.items[i]), page, &rest);
+        if (rel == 0) continue;
+        size_t folder_len = 0;
+        if (rel == 2) {
+            /* One folder row per next component, at its first appearance. */
+            folder_len = first_component_len(rest);
+            int seen = 0;
+            for (size_t j = 0; j < i && !seen; ++j) {
+                const char *prev = NULL;
+                if (path_relation(item_path(&ui->config.items[j]), page, &prev) == 2 &&
+                    first_component_len(prev) == folder_len &&
+                    strncmp(prev, rest, folder_len) == 0)
+                    seen = 1;
+            }
+            if (seen) continue;
+        }
+        if (row == want) {
+            if (item_out) *item_out = rel == 1 ? &ui->config.items[i] : NULL;
+            if (folder_out) *folder_out = rel == 2 ? rest : NULL;
+            if (folder_len_out) *folder_len_out = folder_len;
+            return row;
+        }
+        ++row;
+    }
+    return row;
+}
+
+size_t recomp_runtime_ui_page_entry_count(const RecompRuntimeUi *ui) {
+    return page_walk(ui, (size_t)-1, NULL, NULL, NULL);
+}
+
+const RecompRuntimeUiItem *recomp_runtime_ui_page_entry(
+    const RecompRuntimeUi *ui, size_t row, char *folder_out, size_t folder_size) {
+    const RecompRuntimeUiItem *item = NULL;
+    const char *folder = NULL;
+    size_t folder_len = 0;
+    if (folder_out && folder_size) folder_out[0] = '\0';
+    if (row >= recomp_runtime_ui_page_entry_count(ui)) return NULL;
+    page_walk(ui, row, &item, &folder, &folder_len);
+    if (folder && folder_out && folder_size) {
+        if (folder_len >= folder_size) folder_len = folder_size - 1;
+        memcpy(folder_out, folder, folder_len);
+        folder_out[folder_len] = '\0';
+    }
+    return item;
+}
+
+int recomp_runtime_ui_enter_folder(RecompRuntimeUi *ui, size_t row) {
+    if (!ui || ui->page_depth >= RECOMP_RUNTIME_UI_MAX_DEPTH) return 0;
+    const char *name = NULL;
+    size_t name_len = 0;
+    page_walk(ui, row, NULL, &name, &name_len);
+    if (!name || !name_len) return 0;
+    const size_t used = strlen(ui->page);
+    const size_t need = name_len + (used ? 1 : 0);
+    if (used + need >= sizeof(ui->page)) return 0;
+    ui->row_stack[ui->page_depth++] = row;
+    size_t at = used;
+    if (used) ui->page[at++] = '/';
+    memcpy(ui->page + at, name, name_len);
+    ui->page[at + name_len] = '\0';
+    ui->row_index = 0;
+    return 1;
+}
+
+int recomp_runtime_ui_leave_folder(RecompRuntimeUi *ui) {
+    if (!ui || !ui->page[0]) return 0;
+    char *slash = strrchr(ui->page, '/');
+    if (slash) *slash = '\0';
+    else ui->page[0] = '\0';
+    ui->row_index = ui->page_depth ? ui->row_stack[--ui->page_depth] : 0;
+    return 1;
+}
+
+void recomp_runtime_ui_page_title(const RecompRuntimeUi *ui, char *out,
+                                  size_t out_size) {
+    if (!out || !out_size) return;
+    out[0] = '\0';
+    if (!ui || ui->section_index >= ui->section_count) return;
+    char path[256];
+    open_page_path(ui, path, sizeof(path));
+    size_t o = 0;
+    for (const char *p = path; *p && o + 4 < out_size; ++p) {
+        if (*p == '/') { memcpy(out + o, " > ", 3); o += 3; }
+        else out[o++] = *p;
+    }
+    out[o] = '\0';
+}
+
+static void reset_page(RecompRuntimeUi *ui) {
+    ui->page[0] = '\0';
+    ui->page_depth = 0;
+}
+
 static void visibility(RecompRuntimeUi *ui, int open) {
     if (!ui || ui->open == open) return;
     ui->open = open;
-    if (!open) ui->in_section = 0;
+    if (!open) { ui->in_section = 0; reset_page(ui); }
     if (ui->config.callbacks.visibility_changed)
         ui->config.callbacks.visibility_changed(ui->config.callbacks.context, open);
 }
@@ -50,18 +197,28 @@ RecompRuntimeUi *recomp_runtime_ui_create(const RecompRuntimeUiConfig *config) {
     RecompRuntimeUi *ui = (RecompRuntimeUi *)calloc(1, sizeof(*ui));
     if (!ui) return NULL;
     ui->config = *config;
+    ui->dim = RECOMP_RUNTIME_UI_DEFAULT_DIM;
+    ui->opacity = 1.0f;
     ui->sections = (const char **)calloc(config->item_count, sizeof(*ui->sections));
     if (!ui->sections) {
         free(ui);
         return NULL;
     }
+    /* Top-level sections are the first path components, in first-seen order. */
     for (size_t i = 0; i < config->item_count; ++i) {
-        const char *section = config->items[i].section;
-        if (!section || !*section) section = "Settings";
+        const char *path = item_path(&config->items[i]);
+        if (!path) continue;
+        const size_t len = first_component_len(path);
         int known = 0;
-        for (size_t j = 0; j < ui->section_count; ++j)
-            if (same_text(section, ui->sections[j])) known = 1;
-        if (!known) ui->sections[ui->section_count++] = section;
+        for (size_t j = 0; j < ui->section_count && !known; ++j)
+            if (strlen(ui->sections[j]) == len && strncmp(ui->sections[j], path, len) == 0)
+                known = 1;
+        if (known) continue;
+        char *name = (char *)malloc(len + 1);
+        if (!name) continue;
+        memcpy(name, path, len);
+        name[len] = '\0';
+        ui->sections[ui->section_count++] = name;
     }
     return ui;
 }
@@ -70,10 +227,12 @@ void recomp_runtime_ui_destroy(RecompRuntimeUi *ui) {
     if (!ui) return;
     if (ui->open && ui->config.callbacks.visibility_changed)
         ui->config.callbacks.visibility_changed(ui->config.callbacks.context, 0);
+    for (size_t i = 0; i < ui->section_count; ++i) free((void *)ui->sections[i]);
     free(ui->sections);
     free(ui->owned_items);
     free(ui->owned_view_choices);
     free(ui->owned_view_values);
+    free(ui->owned_confirm_prompts);
     free(ui);
 }
 
@@ -85,13 +244,18 @@ void recomp_runtime_ui_open(RecompRuntimeUi *ui) {
     if (!ui) return;
     ui->in_section = 0;
     ui->row_index = 0;
+    reset_page(ui);
     visibility(ui, 1);
 }
 
 void recomp_runtime_ui_close(RecompRuntimeUi *ui) {
     /* Abandon any in-progress edit, so reopening never resumes a stale buffer
-     * and wants_text_input cannot stay stuck on with the menu shut. */
-    if (ui) ui->editing_text = 0;
+     * and wants_text_input cannot stay stuck on with the menu shut. A pending
+     * "press again" goes too: reopening must not leave one press from quitting. */
+    if (ui) {
+        ui->editing_text = 0;
+        if (ui->confirm_item) show_status(ui, "", 0);
+    }
     visibility(ui, 0);
 }
 
@@ -110,24 +274,39 @@ int recomp_runtime_ui_current_value(RecompRuntimeUi *ui,
 }
 
 static void accepted_change(RecompRuntimeUi *ui, const char *status) {
-    snprintf(ui->status, sizeof(ui->status), "%s", status ? status : "Applied");
-    ui->status_frames = 90;
+    show_status(ui, status ? status : "Applied", 90);
     if (ui->config.callbacks.save)
         ui->config.callbacks.save(ui->config.callbacks.context);
 }
 
 static void accepted_action(RecompRuntimeUi *ui) {
-    snprintf(ui->status, sizeof(ui->status), "%s", "Done");
-    ui->status_frames = 90;
+    show_status(ui, "Done", 90);
+}
+
+/* Items always come from config.items, which are owned_items when the
+ * standard builder made the menu. */
+static const char *owned_confirm_prompt(const RecompRuntimeUi *ui,
+                                        const RecompRuntimeUiItem *item) {
+    if (!ui->owned_confirm_prompts) return NULL;
+    return ui->owned_confirm_prompts[item - ui->config.items];
 }
 
 void recomp_runtime_ui_adjust_current(RecompRuntimeUi *ui, int direction,
                                       int activate, int repeat) {
-    const RecompRuntimeUiItem *item = recomp_runtime_ui_section_item(
-        ui, ui->section_index, ui->row_index);
-    if (!item || !recomp_runtime_ui_item_enabled(ui, item)) return;
+    char folder[96];
+    const RecompRuntimeUiItem *item = recomp_runtime_ui_page_entry(
+        ui, ui->row_index, folder, sizeof(folder));
+    if (!item) {
+        /* A folder row opens on accept; left/right do nothing. */
+        if (folder[0] && activate && !repeat)
+            recomp_runtime_ui_enter_folder(ui, ui->row_index);
+        return;
+    }
+    if (!recomp_runtime_ui_item_enabled(ui, item)) return;
     if (item->type == RECOMP_RUNTIME_UI_ACTION) {
         if (!activate || repeat || !ui->config.callbacks.run_action) return;
+        const char *prompt = owned_confirm_prompt(ui, item);
+        if (prompt && !recomp_runtime_ui_confirm(ui, item, prompt)) return;
         if (ui->config.callbacks.run_action(ui->config.callbacks.context, item))
             accepted_action(ui);
         return;
@@ -199,17 +378,60 @@ int recomp_runtime_ui_wants_text_input(const RecompRuntimeUi *ui) {
     return (ui && ui->open && ui->editing_text) ? 1 : 0;
 }
 
+static float clamp01(float v) {
+    return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+}
+
+void recomp_runtime_ui_set_backdrop(RecompRuntimeUi *ui, float dim, float opacity) {
+    if (!ui) return;
+    ui->dim = clamp01(dim);
+    ui->opacity = clamp01(opacity);
+}
+
+void recomp_runtime_ui_set_status(RecompRuntimeUi *ui, const char *text) {
+    if (!ui) return;
+    show_status(ui, text ? text : "", 180);
+}
+
+int recomp_runtime_ui_confirm(RecompRuntimeUi *ui,
+                              const RecompRuntimeUiItem *item,
+                              const char *prompt) {
+    if (!ui || !item) return 0;
+    /* The prompt still showing is the window: status_frames runs down only
+     * while a presentation draws the open menu. */
+    if (ui->confirm_item && ui->status_frames &&
+        same_text(ui->confirm_item->key, item->key)) {
+        ui->confirm_item = NULL;
+        return 1;
+    }
+    show_status(ui, prompt ? prompt : "Press again to confirm", 180);
+    ui->confirm_item = item;
+    return 0;
+}
+
+void recomp_runtime_ui_set_toast(RecompRuntimeUi *ui, const char *title, const char *body) {
+    if (!ui) return;
+    snprintf(ui->toast_title, sizeof(ui->toast_title), "%s", title ? title : "");
+    snprintf(ui->toast_body, sizeof(ui->toast_body), "%s", body ? body : "");
+}
+
+int recomp_runtime_ui_toast_visible(const RecompRuntimeUi *ui) {
+    return ui && (ui->toast_title[0] || ui->toast_body[0]);
+}
+
 void recomp_runtime_ui_enter_section(RecompRuntimeUi *ui, size_t section) {
     if (!ui || section >= ui->section_count) return;
     ui->section_index = section;
     ui->row_index = 0;
     ui->in_section = 1;
+    reset_page(ui);
 }
 
 void recomp_runtime_ui_leave_section(RecompRuntimeUi *ui) {
     if (!ui) return;
     ui->in_section = 0;
     ui->row_index = 0;
+    reset_page(ui);
 }
 
 int recomp_runtime_ui_handle_input(RecompRuntimeUi *ui,
@@ -231,8 +453,8 @@ int recomp_runtime_ui_handle_input(RecompRuntimeUi *ui,
     if (input == RECOMP_RUNTIME_UI_INPUT_BACK) {
         if (!repeat) {
             if (ui->in_section) {
-                ui->in_section = 0;
-                ui->row_index = 0;
+                if (!recomp_runtime_ui_leave_folder(ui))
+                    recomp_runtime_ui_leave_section(ui);
             } else {
                 recomp_runtime_ui_close(ui);
             }
@@ -242,7 +464,7 @@ int recomp_runtime_ui_handle_input(RecompRuntimeUi *ui,
     if (input == RECOMP_RUNTIME_UI_INPUT_UP ||
         input == RECOMP_RUNTIME_UI_INPUT_DOWN) {
         int delta = input == RECOMP_RUNTIME_UI_INPUT_UP ? -1 : 1;
-        size_t count = ui->in_section ? recomp_runtime_ui_section_item_count(ui, ui->section_index)
+        size_t count = ui->in_section ? recomp_runtime_ui_page_entry_count(ui)
                                       : ui->section_count;
         size_t *selection = ui->in_section ? &ui->row_index : &ui->section_index;
         *selection = wrap_index(*selection, delta, count);
@@ -427,10 +649,54 @@ static void item_value(RecompRuntimeUi *ui, const RecompRuntimeUiItem *item,
     }
 }
 
+/* The toast in the frame's top rows: a panel sized to its longest line. */
+static void render_toast_argb(RecompRuntimeUi *ui, void *pixels, int width,
+                              int height, int pitch, int scale) {
+    LauncherTheme theme = launcher_theme_by_name(ui->config.theme);
+    #define RGB8(c) (((uint32_t)((c).r * 255.0f) << 16) | \
+                     ((uint32_t)((c).g * 255.0f) << 8) | \
+                     (uint32_t)((c).b * 255.0f))
+    const char *lines[8];
+    int line_count = 0;
+    char body[sizeof(ui->toast_body)];
+    snprintf(body, sizeof(body), "%s", ui->toast_body);
+    if (ui->toast_title[0]) lines[line_count++] = ui->toast_title;
+    for (char *p = body; *p && line_count < 8;) {
+        lines[line_count++] = p;
+        char *nl = strchr(p, '\n');
+        if (!nl) break;
+        *nl = 0;
+        p = nl + 1;
+    }
+    int widest = 0;
+    for (int i = 0; i < line_count; ++i) {
+        int w = text_width(lines[i], scale);
+        if (w > widest) widest = w;
+    }
+    const int pad = 4 * scale, row = 9 * scale;
+    int panel_w = widest + pad * 2;
+    if (panel_w > width - 2 * scale) panel_w = width - 2 * scale;
+    const int panel_h = line_count * row + pad * 2 - 2 * scale;
+    const int x = (width - panel_w) / 2, y = 4 * scale;
+    rect(pixels,width,height,pitch,x,y,panel_w,panel_h,RGB8(theme.panel),
+         (unsigned)(230.0f * ui->opacity));
+    outline(pixels,width,height,pitch,x,y,panel_w,panel_h,scale > 1 ? scale / 2 : 1,
+            RGB8(theme.accent2));
+    for (int i = 0; i < line_count; ++i)
+        draw_text(pixels,width,height,pitch,x+pad,y+pad+i*row,scale,
+                  i == 0 && ui->toast_title[0] ? RGB8(theme.accent2) : RGB8(theme.text),
+                  lines[i],x+panel_w-pad);
+    #undef RGB8
+}
+
 void recomp_runtime_ui_render_argb8888(RecompRuntimeUi *ui, void *pixels,
                                        int width, int height, int pitch) {
-    if (!ui || !ui->open || !pixels || width <= 0 || height <= 0 ||
-        pitch < width * 4) return;
+    if (!ui || !pixels || width <= 0 || height <= 0 || pitch < width * 4) return;
+    if (recomp_runtime_ui_toast_visible(ui) && !ui->open) {
+        int toast_scale = height / 224;
+        render_toast_argb(ui, pixels, width, height, pitch, toast_scale < 1 ? 1 : toast_scale);
+    }
+    if (!ui->open) return;
     LauncherTheme theme = launcher_theme_by_name(ui->config.theme);
     int scale = height / 224;
     if (scale < 1) scale = 1;
@@ -450,12 +716,22 @@ void recomp_runtime_ui_render_argb8888(RecompRuntimeUi *ui, void *pixels,
     const uint32_t disabled = RGB8(theme.text_muted);
     const uint32_t border = RGB8(theme.border);
 
-    rect(pixels,width,height,pitch,0,0,width,height,0x000000,130);
-    rect(pixels,width,height,pitch,panel_x,panel_y,panel_w,panel_h,panel,238);
+    /* This presentation's own default dim is 130/255. */
+    const float dim = 130.0f * ui->dim / RECOMP_RUNTIME_UI_DEFAULT_DIM;
+    rect(pixels,width,height,pitch,0,0,width,height,0x000000,
+         (unsigned)(dim > 255.0f ? 255.0f : dim));
+    rect(pixels,width,height,pitch,panel_x,panel_y,panel_w,panel_h,panel,
+         (unsigned)(238.0f * ui->opacity));
     outline(pixels,width,height,pitch,panel_x,panel_y,panel_w,panel_h,
             scale,accent);
     const char *title = ui->config.title ? ui->config.title : "Settings";
     const char *subtitle = ui->config.subtitle;
+    char breadcrumb[256];
+    if (ui->in_section && ui->page[0]) {
+        /* Inside a sub-page the breadcrumb is more useful than the subtitle. */
+        recomp_runtime_ui_page_title(ui, breadcrumb, sizeof(breadcrumb));
+        subtitle = breadcrumb;
+    }
     const int title_w = text_width(title, scale);
     const int subtitle_w = text_width(subtitle, scale);
     const int header_inner_w = panel_w - pad * 2;
@@ -481,7 +757,7 @@ void recomp_runtime_ui_render_argb8888(RecompRuntimeUi *ui, void *pixels,
     int row_h = 15 * scale;
     int visible = (footer_y - list_y) / row_h;
     if (visible < 1) visible = 1;
-    size_t count = ui->in_section ? recomp_runtime_ui_section_item_count(ui, ui->section_index)
+    size_t count = ui->in_section ? recomp_runtime_ui_page_entry_count(ui)
                                   : ui->section_count;
     size_t selection = ui->in_section ? ui->row_index : ui->section_index;
     size_t first = 0;
@@ -492,8 +768,13 @@ void recomp_runtime_ui_render_argb8888(RecompRuntimeUi *ui, void *pixels,
         if (index == selection)
             rect(pixels,width,height,pitch,panel_x+pad/2,y-3*scale,
                  panel_w-pad,row_h,selected,255);
-        if (!ui->in_section) {
-            const char *name = ui->sections[index];
+        char folder[96] = "";
+        const RecompRuntimeUiItem *item = ui->in_section
+            ? recomp_runtime_ui_page_entry(ui, index, folder, sizeof(folder))
+            : NULL;
+        if (!ui->in_section || !item) {
+            /* Section on the top level, or a folder row inside a page. */
+            const char *name = ui->in_section ? folder : ui->sections[index];
             draw_text(pixels,width,height,pitch,panel_x+pad,y,scale,
                       index == selection ? white : muted,name,
                       panel_x+panel_w-pad-12*scale);
@@ -501,8 +782,6 @@ void recomp_runtime_ui_render_argb8888(RecompRuntimeUi *ui, void *pixels,
                       scale,index == selection ? accent : muted,">",
                       panel_x+panel_w-pad);
         } else {
-            const RecompRuntimeUiItem *item = recomp_runtime_ui_section_item(
-                ui, ui->section_index, index);
             int enabled = recomp_runtime_ui_item_enabled(ui, item);
             uint32_t color = enabled ? (index == selection ? white : muted)
                                      : disabled;
@@ -519,9 +798,11 @@ void recomp_runtime_ui_render_argb8888(RecompRuntimeUi *ui, void *pixels,
 
     const char *help = "UP/DOWN SELECT  LEFT/RIGHT CHANGE  ENTER ACCEPT";
     if (ui->in_section) {
-        const RecompRuntimeUiItem *item = recomp_runtime_ui_section_item(
-            ui, ui->section_index, ui->row_index);
+        char folder[96];
+        const RecompRuntimeUiItem *item = recomp_runtime_ui_page_entry(
+            ui, ui->row_index, folder, sizeof(folder));
         if (item && item->description && *item->description) help = item->description;
+        else if (!item && folder[0]) help = "ENTER OPEN  ESC BACK";
     }
     rect(pixels,width,height,pitch,panel_x+pad,footer_y-4*scale,
          panel_w-pad*2,scale,border,255);
@@ -535,4 +816,6 @@ void recomp_runtime_ui_render_argb8888(RecompRuntimeUi *ui, void *pixels,
         --ui->status_frames;
     }
     #undef RGB8
+    if (recomp_runtime_ui_toast_visible(ui))
+        render_toast_argb(ui, pixels, width, height, pitch, scale);
 }

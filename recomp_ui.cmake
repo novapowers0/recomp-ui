@@ -57,11 +57,23 @@ set(RUI_SRC    ${RECOMP_UI_ROOT}/src)
 set(RUI_IMGUI  ${RUI_SRC}/third_party/imgui)
 set(RUI_ASSETS ${RECOMP_UI_ROOT}/assets)
 include("${RECOMP_UI_ROOT}/cmake/recomp_ui_assets.cmake")
+include("${RECOMP_UI_ROOT}/cmake/recomp_gl.cmake")
 
 # The ImGui backend is C++; the host project() is often C-only. enable_language
 # must run at directory scope (not inside the function, which executes during
 # generation), so it lives here — safe/idempotent if CXX is already enabled.
 enable_language(CXX)
+
+set(RECOMP_UI_LANGUAGE "" CACHE STRING
+    "Default launcher UI language code. Empty keeps English.")
+
+function(recomp_target_launcher_language TGT LANGUAGE)
+    if("${LANGUAGE}" STREQUAL "")
+        return()
+    endif()
+    target_compile_definitions(${TGT} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:RECOMP_UI_LANGUAGE="${LANGUAGE}">)
+endfunction()
 
 function(recomp_target_launcher_ui TGT)
     # BOXART_NAME: destination basename for BOXART under assets/img/ (default
@@ -76,10 +88,12 @@ function(recomp_target_launcher_ui TGT)
     # that recomp-ui's own backend glue (launcher_imgui.cpp) compiles against.
     # Used by gb-recompiled, whose runtime already vendors + uses ImGui for its
     # in-game menu. Omit both to keep the default self-contained vendored ImGui.
+    # LANGUAGE: launcher UI language code for this target. Missing translation
+    # keys fall back to the source English string.
     cmake_parse_arguments(
         RUI
         "HOST_IMGUI"
-        "CONSOLE;BOXART;BOXART_NAME;PAD;BRAND;IMGUI_DIR"
+        "CONSOLE;BOXART;BOXART_NAME;PAD;BRAND;IMGUI_DIR;LANGUAGE"
         ""
         ${ARGN})
 
@@ -141,17 +155,32 @@ function(recomp_target_launcher_ui TGT)
         ${RUI_SRC}/common/launcher_files.c
         ${RUI_SRC}/common/launcher_debug.c
         ${RUI_SRC}/common/launcher_binds.c
+        ${RUI_SRC}/common/pad_binds.c          # per-GUID input.ini store (all consoles)
         ${RUI_SRC}/common/launcher_udp_port.c  # host-lobby UDP port probe / auto-pick
         ${RUI_SRC}/common/recomp_runtime_ui.c # renderer-agnostic in-game overlay
         ${RUI_SRC}/common/recomp_runtime_settings.c # shared cross-ecosystem setting catalog
+        ${RUI_SRC}/common/recomp_frame_blend.c # shared presentation blend (Settings.frame_blend)
+        ${RUI_SRC}/common/recomp_moderation.c # local ignore/block list (moderation.ini)
+        ${RUI_SRC}/common/recomp_flash_guard.c # shared photosensitivity flash filter
         ${RUI_SRC}/common/launcher_boot_timing.c  # PSX_LAUNCHER_BOOT_TIMING / LNG_BOOT_TIMING
         ${RUI_SRC}/common/launcher_ng_capi.c   # implements recomp_launcher_run_window()
+        ${RUI_SRC}/common/launcher_i18n.cpp
+        ${RUI_SRC}/common/launcher_mod_visibility.c # which mod features/packages the player sees
+        # color emoji for chat: scanner + per-platform rasterizers (each
+        # provider compiles to nothing where its platform/deps are absent)
+        ${RUI_SRC}/common/emoji/recomp_emoji.c
+        ${RUI_SRC}/common/emoji/recomp_emoji_freetype.c
+        ${RUI_SRC}/common/emoji/recomp_emoji_win32.cpp
+        ${RUI_SRC}/common/emoji/recomp_emoji_flags.c   # bundled flag sheet (all platforms)
         ${RUI_SRC}/third_party/tinyfiledialogs.c
         # console-specific helpers (src/consoles/<id>/) — always compiled, only
         # reached when the active SystemProfile opts into the capability
         ${RUI_SRC}/consoles/psx/memcard_format.c   # PS1 blank memory-card image writer
         ${RUI_SRC}/consoles/psx/psx_binds.c        # PSX-native keybind persistence bridge
-        ${RUI_SRC}/consoles/n64/n64_binds.c        # N64-native input.cfg bridge (kb+pad tables)
+        ${RUI_SRC}/consoles/psx/psx_pad_binds.c    # PSX button table over common/pad_binds.c
+        ${RUI_SRC}/consoles/snes/snes_pad_binds.c  # SNES button table over common/pad_binds.c
+        ${RUI_SRC}/consoles/n64/n64_binds.c        # N64-native input.cfg bridge (keyboard table + mirror)
+        ${RUI_SRC}/consoles/n64/n64_pad_binds.c    # N64 button table over common/pad_binds.c
         ${RUI_SRC}/consoles/nes/nes_binds.c        # NES-native keybind persistence bridge
         ${RUI_SRC}/consoles/genesis/genesis_binds.c # Genesis-native settings.ini key.*/pad.* bridge
         ${RUI_SRC}/consoles/gb/gb_binds.c          # Game Boy-native keybinds.ini [controls] bridge
@@ -168,6 +197,15 @@ function(recomp_target_launcher_ui TGT)
         ${RUI_SRC}/common/backends/imgui/runtime_ui_imgui.cpp
         ${_rui_imgui_sources}
     )
+    # Two TUs carry the vendored stb_image.h, which trips GCC 15's
+    # -Wstringop-overflow in stbi__parse_png_file (a false positive on the
+    # 3-byte transparency key). A clean build of a game should not print a
+    # third party's warning; those TUs are built with it off on GCC.
+    set_source_files_properties(
+        ${RUI_SRC}/common/launcher_gl.c
+        ${RUI_SRC}/common/emoji/recomp_emoji_flags.c
+        PROPERTIES COMPILE_OPTIONS
+        "$<$<C_COMPILER_ID:GNU>:-Wno-stringop-overflow>")
 
     target_include_directories(${TGT} PRIVATE
         ${RUI_SRC}                   # recomp_launcher.h / launcher_profile.h / launcher_system.h
@@ -184,6 +222,11 @@ function(recomp_target_launcher_ui TGT)
         RECOMP_LAUNCHER           # un-gate the GUI launcher block in the host's main()
         RECOMP_UI_ENABLE_MODS=$<BOOL:${RECOMP_UI_ENABLE_MODS}>
         SDL_MAIN_HANDLED)         # our real main() is the entry point (no SDL_main redirect)
+    if(RUI_LANGUAGE)
+        recomp_target_launcher_language(${TGT} "${RUI_LANGUAGE}")
+    elseif(RECOMP_UI_LANGUAGE)
+        recomp_target_launcher_language(${TGT} "${RECOMP_UI_LANGUAGE}")
+    endif()
     if(ANDROID)
         target_compile_definitions(${TGT} PRIVATE
             LNG_GLES2=1
@@ -195,6 +238,9 @@ function(recomp_target_launcher_ui TGT)
     else()
         message(STATUS "recomp-ui: SDL2 compatibility platform backend")
     endif()
+
+    find_package(Threads REQUIRED)
+    target_link_libraries(${TGT} PRIVATE Threads::Threads)
 
     # OpenGL: the ImGui GL3 backend + launcher_gl.c need the system GL library.
     # Link it here so a host gets it from this ONE call (self-contained) rather
@@ -211,8 +257,41 @@ function(recomp_target_launcher_ui TGT)
         # ws2_32: launcher_udp_port.c exclusive UDP bind probes for host lobby.
         target_link_libraries(${TGT} PRIVATE opengl32 ws2_32)
     else()
-        find_package(OpenGL REQUIRED)
-        target_link_libraries(${TGT} PRIVATE OpenGL::GL ${CMAKE_DL_LIBS})
+        # OpenGL::GL is absent on GLVND hosts without legacy libGL/glx.h
+        # (Steam Deck) even though the package is found — see cmake/recomp_gl.cmake.
+        recomp_resolve_gl(RUI_GL_TARGET)
+        target_link_libraries(${TGT} PRIVATE ${RUI_GL_TARGET} ${CMAKE_DL_LIBS})
+    endif()
+
+    # ---- color emoji providers (see src/common/emoji/recomp_emoji.h) ----------
+    # Windows: DirectWrite + Direct2D on Segoe UI Emoji (always available).
+    # Elsewhere: FreeType on the system color emoji font when the build can find
+    # FreeType, plus HarfBuzz for sequence shaping when that is around too. A
+    # build without either simply keeps the outline emoji glyphs — no option to
+    # remember, no missing-dependency failure.
+    if(WIN32)
+        target_link_libraries(${TGT} PRIVATE d2d1 dwrite windowscodecs ole32)
+    elseif(NOT ANDROID)
+        find_package(Freetype QUIET)
+        if(TARGET Freetype::Freetype)
+            target_compile_definitions(${TGT} PRIVATE RECOMP_UI_HAVE_FREETYPE=1)
+            target_link_libraries(${TGT} PRIVATE Freetype::Freetype)
+            find_package(PkgConfig QUIET)
+            if(PkgConfig_FOUND)
+                pkg_check_modules(RUI_HARFBUZZ QUIET IMPORTED_TARGET harfbuzz)
+                if(RUI_HARFBUZZ_FOUND)
+                    target_compile_definitions(${TGT} PRIVATE RECOMP_UI_HAVE_HARFBUZZ=1)
+                    target_link_libraries(${TGT} PRIVATE PkgConfig::RUI_HARFBUZZ)
+                endif()
+            endif()
+            if(RUI_HARFBUZZ_FOUND)
+                message(STATUS "recomp-ui: color emoji via FreeType + HarfBuzz")
+            else()
+                message(STATUS "recomp-ui: color emoji via FreeType (no HarfBuzz: sequences unjoined)")
+            endif()
+        else()
+            message(STATUS "recomp-ui: no FreeType; emoji stay outline glyphs")
+        endif()
     endif()
 
     if(NOT MSVC)
@@ -308,4 +387,58 @@ function(recomp_stage_launcher_assets TGT)
                     ${RSA_BOXART} $<TARGET_FILE_DIR:${TGT}>/assets/img/${RSA_DEST}
             VERBATIM)
     endif()
+endfunction()
+
+# recomp_target_launcher_netplay(<host_target> [RECOMP_NET_TARGET <tgt>])
+#
+# OPTIONAL. The launcher's netplay backend -- RecompLauncherCNetplayCallbacks
+# over recomp-net's lobby protocol client and LAN modules -- as the static
+# library `recomp_launcher_netplay`, linked into <host_target>. Header:
+# src/recomp_netplay_host.h; contract: docs/HOST_NETPLAY.md.
+#
+# It needs recomp-net (a target, `recomp_net` unless RECOMP_NET_TARGET names
+# another, that exports recomp_net/lobby_client.h). recomp-ui itself does not:
+# a consumer that never calls this builds exactly as before, and the launcher
+# NULL-guards every netplay callback. Call it after the recomp-net target
+# exists (add_subdirectory / the engine's own helper). The library is created
+# once and shared by every target that asks.
+function(recomp_target_launcher_netplay TGT)
+    cmake_parse_arguments(RTN "" "RECOMP_NET_TARGET" "" ${ARGN})
+    if(NOT TARGET ${TGT})
+        message(FATAL_ERROR
+            "recomp_target_launcher_netplay(${TGT}): target does not exist")
+    endif()
+    if(NOT RTN_RECOMP_NET_TARGET)
+        set(RTN_RECOMP_NET_TARGET recomp_net)
+    endif()
+    if(NOT TARGET ${RTN_RECOMP_NET_TARGET})
+        message(FATAL_ERROR
+            "recomp_target_launcher_netplay(${TGT}): recomp-net target "
+            "'${RTN_RECOMP_NET_TARGET}' does not exist. Add recomp-net first "
+            "(it provides recomp_net/lobby_client.h), or do not call this -- "
+            "the netplay backend is optional.")
+    endif()
+    if(NOT TARGET recomp_launcher_netplay)
+        add_library(recomp_launcher_netplay STATIC
+            ${RUI_SRC}/netplay/recomp_netplay_host.c)
+        target_include_directories(recomp_launcher_netplay PUBLIC ${RUI_SRC})
+        target_link_libraries(recomp_launcher_netplay PUBLIC ${RTN_RECOMP_NET_TARGET})
+        set_target_properties(recomp_launcher_netplay PROPERTIES
+            C_STANDARD 11 C_STANDARD_REQUIRED ON)
+        if(UNIX)
+            target_compile_definitions(recomp_launcher_netplay PRIVATE
+                _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+        endif()
+        set_property(TARGET recomp_launcher_netplay PROPERTY
+            RECOMP_NET_TARGET ${RTN_RECOMP_NET_TARGET})
+    else()
+        get_target_property(_rtn_prev recomp_launcher_netplay RECOMP_NET_TARGET)
+        if(NOT _rtn_prev STREQUAL RTN_RECOMP_NET_TARGET)
+            message(FATAL_ERROR
+                "recomp_target_launcher_netplay(${TGT}): recomp_launcher_netplay "
+                "already links '${_rtn_prev}', not '${RTN_RECOMP_NET_TARGET}'")
+        endif()
+    endif()
+    target_link_libraries(${TGT} PRIVATE recomp_launcher_netplay)
+    target_compile_definitions(${TGT} PRIVATE RECOMP_UI_HAS_NETPLAY_HOST=1)
 endfunction()

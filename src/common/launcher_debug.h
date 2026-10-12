@@ -7,7 +7,8 @@
 // Driven by the LNG_SCRIPT env var: a ';'-separated command list, executed one
 // command per frame.
 //
-//   view:dashboard|settings|controller   switch view (no clicking required)
+//   view:dashboard|settings|controller|assist_tools|credits
+//                                          switch view (no clicking required)
 //   player:0|1                           which player the controller view edits
 //   size:WxH                             resize the window (tests live reflow)
 //   click:X,Y                            synthetic click at logical coords
@@ -21,6 +22,10 @@
 //
 // Screenshots capture the real framebuffer (glReadPixels), so what lands in the
 // PNG is exactly what a user would see, at whatever DPI scale is in effect.
+//
+// LNG_TEST_HIDDEN=1 (with LNG_SCRIPT) creates the window hidden on both the
+// SDL2 and SDL3 backends, so automated runs never appear on the desktop or
+// take focus; shot: still captures the rendered frame.
 
 #ifndef LAUNCHER_NG_DEBUG_H
 #define LAUNCHER_NG_DEBUG_H
@@ -44,6 +49,10 @@ void launcher_debug_init(void);
 // BEFORE presenting, so `shot:` captures the completed frame. Sets
 // m->action = LNG_ACTION_QUIT when the script ends or hits `quit`.
 void launcher_debug_step(LauncherPlatform* p, LauncherModel* m);
+/* While an owned provider job is pending, allow window/event/wait/screenshot
+ * commands, defer direct model commands, and return true for quit/exhaustion.
+ * Never reads or mutates the model; the backend queues the close until join. */
+bool launcher_debug_step_pending(LauncherPlatform* p);
 
 // Write the current GL framebuffer to a PNG (RGB, row-flipped).
 bool launcher_capture_png(const char* path, int w, int h);

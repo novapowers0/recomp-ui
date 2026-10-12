@@ -42,12 +42,65 @@ An N64 host therefore gets the clean graphite/red/blue N64 theme with no CRT
 scanlines; SNES uses its console theme; handheld themes remain flat rather than
 pretending to be a CRT.
 
+Physically small, high-density touch devices are an explicit host opt-in rather
+than an operating-system guess. Set
+`RecompRuntimeUiConfig.presentation_flags` to include
+`RECOMP_RUNTIME_UI_PRESENTATION_TOUCH_FRIENDLY`. The ImGui presentation then
+uses almost the full drawable, scales rows and spacing from the short display
+axis, widens the section rail and scroll grab, replaces desktop key hints with
+touch copy, and gives stepped values and Resume phone-sized hit targets. A zero
+flag retains the desktop/TV geometry byte-for-byte, including on platforms that
+also happen to support touch.
+
 The vendored SDL_Renderer2 backend is the official backend from the matching
 Dear ImGui `v1.91.9b` release. It requires SDL 2.0.17 or newer. A host using an
 SDL logical presentation size must temporarily render the ImGui frame at the
 renderer output size, then restore its logical size and viewport before the
 next game frame. Event routing remains the host's responsibility through the
 shared SDL2 platform backend.
+
+`recomp_runtime_ui_set_backdrop(ui, dim, opacity)` lets the host expose how
+much the menu covers the game (how dark the game behind it gets, and how solid
+the panel is), so a player can see a picture setting's effect through it.
+`RECOMP_RUNTIME_UI_STANDARD_MENU_BACKDROP` offers both to the player as
+Display rows, "Game dimming" and "Menu opacity" (`RECOMP_RUNTIME_UI_KEY_MENU_DIM`
+/ `_MENU_OPACITY`, percents in steps of 10). The host stores and persists them
+like any other setting and passes them on as `dim / 100.0f, opacity / 100.0f`;
+`RECOMP_RUNTIME_UI_DEFAULT_DIM_PERCENT` and 100 match the menu's own look.
+
+Two more System rows go with save states and the pause policy:
+`RECOMP_RUNTIME_UI_STANDARD_STATE_SLOT` (the slot Save state / Load state use,
+1 to `state_slot_count`, default 10) and
+`RECOMP_RUNTIME_UI_STANDARD_PAUSE_IN_MENU`, which hands the player the host's
+pause policy. The menu still pauses nothing itself; the host reads the value
+and decides.
+
+`recomp_runtime_ui_set_status(ui, text)` shows a message in the footer, e.g. a
+slot summary from a save-state action (return 0 from its `run_action` so
+"Done" does not replace it).
+
+An action that is hard to undo -- restart, quit, return to the launcher --
+should take a second press. `recomp_runtime_ui_confirm(ui, item, prompt)` is
+that press: call it from `run_action` and return 0 while it returns 0. The
+first press puts `prompt` in the footer; pressing the same row again while it
+is still up confirms. Any other status, another row's prompt, or closing the
+menu withdraws it, and a held button never confirms. The standard
+`RECOMP_RUNTIME_UI_STANDARD_RETURN_TO_LAUNCHER` and
+`RECOMP_RUNTIME_UI_STANDARD_QUIT` rows do this themselves: the host's
+`run_action` only sees the confirmed press, for
+`RECOMP_RUNTIME_UI_KEY_RETURN_TO_LAUNCHER` / `RECOMP_RUNTIME_UI_KEY_QUIT`.
+
+`recomp_runtime_ui_set_toast(ui, title, body)` shows a small notice near the
+top of the display with or without the menu -- the answer to a host shortcut,
+such as what a drive holds after its button was pressed. The model keeps no
+clock: the host sets, refreshes and clears it (`NULL, NULL`) and decides what
+a press means while one is up. Both presentations draw it; like the menu it
+is presentation only, so a host captures the game's own picture before
+drawing either.
+
+Selection is the model's alone: the ImGui window takes no keyboard/gamepad
+navigation of its own (`ImGuiWindowFlags_NoNavInputs`, except while a text row
+is edited), or Enter / A would also activate the row under ImGui's own cursor.
 
 ## What “every recomp-ui game” requires
 

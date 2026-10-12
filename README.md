@@ -1,5 +1,7 @@
 # recomp-ui
 
+> ℹ️ **Note from mstan:** This repo and I are now part of [RetroPortingToolkit](https://retroportingtoolkit.com/). I remain a primary maintainer of recomp-ui alongside the team. [More info](https://1379.tech/forming-a-collective-retro-porting-toolkit/).
+
 A shared, **console-agnostic launcher and in-game settings UI** for static-
 recompilation game ports. One Dear ImGui launcher core serves every recomp
 ecosystem — SNES, PSX, N64, Nintendo DS, Genesis, NES, and beyond — while a small runtime
@@ -105,6 +107,11 @@ RecompLauncherCGameInfo gi = {0};
 launcher_profile_apply("snes", &gi);   // "psx", "n64", ... — one call sets the console identity
 gi.name = "My Game";
 gi.expected_crc = 0x1B4B2E9C; gi.has_expected_crc = 1;
+RecompLauncherCSettings defaults = { /* authoritative first-run values */ };
+gi.default_settings = &defaults;       // optional Restore Defaults action
+gi.has_assist_tools = 1;               // optional host-defined opt-in page
+gi.assist_tools_note = "Enables host convenience features.";
+gi.credits_text = "Original game and port credits."; // optional read-only page
 /* ...per-game overrides... */
 
 char out_rom[512];
@@ -113,6 +120,29 @@ int rc = recomp_launcher_run_window("My Game — Launcher", &io, &gi,
 // rc: 0 = LAUNCH (boot out_rom with the edited io), 1 = QUIT, 2 = UNAVAILABLE
 #endif
 ```
+
+For the SNES profile, this entry point loads launcher preferences from
+`gi.config_path` (default `config.ini`) and saves edited settings on **Play,
+Quit, and Relaunch**. A host that ignores `io` on Quit therefore no longer
+loses the player's fullscreen or other launcher edits. The Settings page
+explains when changes are saved; no separate Save button is needed.
+
+The store uses the established SNES INI keys, preserves unrelated sections
+and comments, and writes only fields changed by the player. Optional settings
+are gated by the host's capability flags. Widescreen mod state, keybindings,
+ROM selection, and transient netplay launch data retain their existing owners.
+Other console profiles keep their host-owned configuration formats.
+
+When the host supplies `gi.config_path`, the launcher also remembers its own
+resized width and height in `launcher-window.ini` beside that config. These are
+logical UI dimensions, fitted to the current display's DPI and work area on
+reopen; they do not change the game's window-size setting. Missing or invalid
+dimensions use the normal 1100 by 880 startup size. Window position is not saved.
+
+Hosts must still apply returned preferences to the running game. A UI pin
+cannot implement a renderer/audio feature the host does not consume, or load
+preferences on a boot path that never calls the launcher. Hosts that already
+read the SNES INI keys also see saved settings on direct-ROM/skip-launch boots.
 
 The whole contract is [`src/recomp_launcher.h`](src/recomp_launcher.h): a plain-C
 settings struct in/out, a game-facts struct, and (optionally) **host callbacks**
@@ -263,6 +293,41 @@ success. A failed commit keeps the launcher open and displays `last_error`; the
 host can perform final target verification, dependency resolution, collision
 checks, persistence, and plan construction there.
 
+For statically paired builds, a host may set `commit_worker_safe = 1` when
+`RECOMP_LAUNCHER_HAS_WORKER_MOD_COMMIT` is defined. This explicitly certifies
+that `commit`, `last_error`, and every service they invoke have no UI, SDL, GL,
+or main-thread affinity, and that their context stays alive until the launcher
+returns. Only preboot offline PLAY uses the owned worker. The UI renders a
+progress view and pumps events without any provider access or model edits;
+close requests wait for completion and join before returning QUIT. The image
+path and failure text are copied, and a failed commit stays in the launcher.
+Verification gates remain unchanged. Zero-initialized providers, netplay, and
+in-session Resume/close retain synchronous behavior. This struct has no
+negotiated size: the appended capability supports source compatibility, not
+loading an older binary provider object.
+
+An audited host may additionally supply `try_commit(ctx, image_path)` and
+`preparation_revision(ctx)` when `RECOMP_LAUNCHER_HAS_PREPARED_MOD_COMMIT` is
+defined. Both callbacks and the worker-safe opt-in are required. `try_commit`
+returns 1 only after committing an authoritative prepared plan, 0 when the
+worker must prepare it, or -1 for an error from `last_error`. It must perform
+no resource preparation or heavy reads. The revision is a cheap generation
+for selection, option, source and catalog changes, stable during commit.
+The host owns complete ticket validation and invalidation; the UI never
+accepts its remembered path/revision as proof that a launch is ready.
+
+With this capability, initial selected-image/source changes can prepare on
+the owned worker before PLAY. Requests coalesce after the frame's provider
+reads, once active edits, popups and setup operations finish. Adding an
+unselected disc slot does not prepare another image. Preparation success
+stays in the launcher; errors remain visible without an automatic retry loop,
+and closing still waits for the worker and wins over success. Unchanged warm
+PLAY succeeds through `try_commit` without a worker or progress view. Cold
+PLAY retains the existing progress and validation behavior. Netplay and
+in-session commits keep their existing paths; commit-only hosts never
+auto-prepare. A host can prime a validated warm ticket before opening the UI
+so an ordinary warm launcher does not need a preparation screen at all.
+
 Hosted-lobby, LAN, and direct netplay launches never call the normal `commit()`.
 If supplied, `commit_netplay()` should clear any in-session mod plan without
 changing the user's persisted offline selection. If it is `NULL`, recomp-ui
@@ -341,6 +406,9 @@ menu.items = rows;
 menu.item_count = sizeof(rows) / sizeof(rows[0]);
 menu.callbacks = callbacks;
 menu.theme = "n64"; /* same id used by launcher_profile_apply() */
+/* Optional for a physically small, high-density touchscreen. */
+menu.presentation_flags =
+    RECOMP_RUNTIME_UI_PRESENTATION_TOUCH_FRIENDLY;
 RecompRuntimeUi *ui = recomp_runtime_ui_create(&menu);
 ```
 
@@ -414,6 +482,28 @@ snesrecomp `docs/RECOMP_NET.md` → "Soft-return rematch checklist".
   resolution, and committing changes before launch; recomp-ui never executes
   package code.
 - **Footer** — PLAY, skip-launcher-on-boot (+ confirm modal), gamepad navigation.
+- **Optional host pages** — an Assist Tools opt-in backed by
+  `RecompLauncherCSettings.assist_tools`, plus host-owned read-only Credits
+  text. Games that do not supply these capabilities retain the original three
+  views.
+
+---
+
+When `RecompLauncherCGameInfo.default_settings` is non-NULL, the Settings
+footer also exposes a confirmed **Restore Defaults** action. The snapshot is
+copied at launcher initialization; resetting never changes the separately
+owned ROM selection or deletes save files.
+
+`RecompLauncherCGameInfo.has_assist_tools` adds an Assist Tools page and
+persists its checkbox through `RecompLauncherCSettings.assist_tools`.
+An opt-in `settings_bindings` host can keep keyboard and standard-controller
+bindings directly in the settings structure instead of pointing the launcher
+at a runtime-specific bind file. The same mode can supply named global Assist
+actions; they appear on the Assist page and are returned to the host as SDL
+scancodes plus portable standard-controller button/axis encodings.
+`credits_text` adds a Credits page. Both are additive host capabilities:
+recomp-ui defines presentation and navigation, while the game host defines
+the meaning of Assist Tools and owns the UTF-8 credits text.
 
 ---
 
@@ -563,6 +653,9 @@ optional native bind bridge) registered in `src/launcher_system.h`, a theme in
 and its `.c` files + assets wired into `recomp_ui.cmake`.
 
 ## License
+
+recomp-ui is licensed under the [MIT License](LICENSE). Copyright (c) 2026
+Matthew Stanley.
 
 Bundled third-party code (Dear ImGui, stb, tinyfiledialogs) retains its own
 licenses under `src/third_party/`.

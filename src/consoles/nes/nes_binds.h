@@ -33,7 +33,7 @@ extern "C" {
 // the runner itself, so whatever this reads is exactly what the game reads.
 void rui_nes_binds_init(const char* path);
 
-// Current binding (SDL_Scancode as int) for player (0..1), rebind-spec
+// Current binding (SDL_Scancode as int) for player (0..3), rebind-spec
 // button b (0..LNG_NES_PAD_BUTTON_COUNT-1). Auto-initializes from `path`
 // on first use.
 int rui_nes_binds_get(const char* path, int player, int b);
@@ -48,6 +48,14 @@ void rui_nes_binds_reset(const char* path, int player);
 // _get auto-initializes from `path`; _set persists surgically.
 void rui_nes_zapper_get(const char* path, int* mouse_enabled, int* crosshair);
 void rui_nes_zapper_set(const char* path, int mouse_enabled, int crosshair);
+
+/* Optional Voxel/3D camera bindings ([camera]). These are global presentation
+ * controls, not NES controller bits, and are shown only while an enabled mod
+ * feature advertises camera_controls. Indices are LNG_CAMERA_* from
+ * launcher_model.h. Missing keys are seeded surgically with numpad defaults. */
+int  rui_nes_camera_bind_get(const char* path, int action);
+void rui_nes_camera_bind_set(const char* path, int action, int scancode);
+void rui_nes_camera_bind_reset(const char* path);
 
 #ifdef __cplusplus
 }

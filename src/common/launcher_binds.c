@@ -5,6 +5,7 @@
 #include "keybinds.h"             // engine keyboard-binding store
 #include "launcher_system.h"      // SystemProfile / ControllerSpec.button_count
 #include "pad_binds.h"            // shared per-GUID input.ini store (path rule)
+#include "consoles/gba/gba_pad_binds.h"
 #include "consoles/psx/psx_binds.h"   // PSX-native keybind bridge (psx_keybinds.c format)
 #include "consoles/psx/psx_pad_binds.h" // PSX gamepad input.ini per-GUID bridge
 #include "consoles/n64/n64_binds.h"   // N64-native input.cfg bridge (keyboard table)
@@ -129,6 +130,16 @@ static int is_n64_profile(const LauncherModel* m) {
     return prof && prof->id && !strcmp(prof->id, "n64");
 }
 
+static int is_gba_profile(const LauncherModel* m) {
+    const SystemProfile* prof=m?(const SystemProfile*)m->profile:NULL;
+    return prof && prof->id && !strcmp(prof->id,"gba");
+}
+static const char* gba_input_ini_path(void) {
+    static char path[1024];
+    rui_pad_binds_sibling_path(g_launcher_keybinds_path,"input.ini",path,sizeof(path));
+    return path;
+}
+
 static const char* n64_binds_file_path(void) {
     return (g_launcher_keybinds_path && g_launcher_keybinds_path[0])
              ? g_launcher_keybinds_path : "input.cfg";
@@ -212,7 +223,7 @@ static const char* kHotkeyKey[] = {
     "WindowBigger", "WindowSmaller", "VolumeUp", "VolumeDown",
     "DisplayPerf", "ToggleRenderer",
     "SolarBrighter", "SolarDimmer", "SolarLive",
-    "Rewind", "SaveStateMenu", "OpenLauncher", "TurboToggle"
+    "Rewind", "SaveStateMenu", "OpenLauncher", "TurboToggle", "QuickSave", "QuickLoad"
 };
 // Built-in defaults (shown when config.ini has no line; "" = unbound).
 static const char* kHotkeyDef[] = {
@@ -221,7 +232,7 @@ static const char* kHotkeyDef[] = {
      * (psxrecomp host_keymap reads these from [KeyMap]). */
     "", "", "Keypad +", "Keypad -", "F", "R",
     "", "", "",
-    "F8", "F7", "Ctrl+L", "F9"
+    "F8", "F7", "Ctrl+L", "F9", "F5", "Shift+F5"
 };
 /* Sized by their initializers, so a hotkey added to LngHotkey without a key
  * and a default here fails the build instead of reading a NULL. */
@@ -348,12 +359,17 @@ static void reload_player_display(LauncherModel* m, int player) {
         }
         return;
     }
-    if (player > 2) return;   // generic keybinds.c store is 2-player
+    if (player > KEYBINDS_MAX_PLAYERS) return;   // generic keybinds.c store
     int n = 0;
     const int* kb_index = active_kb_index(m, &n);
     for (int b = 0; b < n; ++b) {
         SDL_Scancode sc = recompui_keybinds_get_button(player, kb_index[b]);
         copy_str(m->binds[player - 1][b], sizeof(m->binds[player - 1][b]), scancode_label(sc));
+    }
+    if (is_gba_profile(m) && player==1) {
+        for(int b=0;b<10;++b)
+            rui_pad_binds_label(&kRuiGbaPadSpec,gba_input_ini_path(),m->s.player_gamepad_guid[0],b,
+                               m->pad_binds[0][b],sizeof(m->pad_binds[0][b]));
     }
     if (is_snes_profile(m)) {
         char controls[LNG_SNES_PAD_BUTTON_COUNT][48];
@@ -403,6 +419,13 @@ static const char* config_path(void) {
 static void reload_hotkey_display(LauncherModel* m) {
     for (int h = 0; h < LNG_HK_COUNT; ++h)
         copy_str(m->hotkeys[h], sizeof(m->hotkeys[h]), kHotkeyDef[h]);
+    static const char* const psx_keys[] = {"Rewind", "SaveStateMenu", "Turbo", "TurboToggle"};
+    static const SDL_Scancode psx_defaults[] = {SDL_SCANCODE_F8, SDL_SCANCODE_F7, SDL_SCANCODE_TAB, SDL_SCANCODE_F9};
+    if (is_psx_profile(m))
+        for (int i = 0; i < 4 && i < m->assist_binding_count; ++i) {
+            m->s.assist_key_bind[i] = psx_defaults[i];
+            m->default_assist_key_bind[i] = psx_defaults[i];
+        }
 
     long len = 0; char* text = read_whole(config_path(), &len);
     if (!text) return;
@@ -436,6 +459,15 @@ static void reload_hotkey_display(LauncherModel* m) {
                 copy_str(m->hotkeys[h], sizeof(m->hotkeys[h]), unbound ? "(unbound)" : v);
                 break;
             }
+        if (is_psx_profile(m))
+            for (int i = 0; i < 4 && i < m->assist_binding_count; ++i)
+                if (ieq(p, klen, psx_keys[i])) {
+                    /* Named capture is a single physical key. Preserve a legacy
+                     * modifier/multiple binding on disk until explicitly edited. */
+                    m->s.assist_key_bind[i] = strchr(v, '+') || strchr(v, ',') ? 0 :
+                        (int)SDL_GetScancodeFromName(v);
+                    break;
+                }
     }
     free(text);
 }
@@ -445,6 +477,15 @@ static void reload_hotkey_display(LauncherModel* m) {
 // Original config.ini [KeyMap] entry point, now a thin wrapper.
 static void keymap_write(const char* key, const char* value) {
     launcher_ini_kv_write(config_path(), "KeyMap", key, value);
+}
+
+void launcher_binds_set_assist_key(LauncherModel* m, int action, int scancode) {
+    static const char* const names[] = {"Rewind", "SaveStateMenu", "Turbo", "TurboToggle"};
+    if (!m || !is_psx_profile(m) || action < 0 || action >= 4 ||
+        action >= m->assist_binding_count) return;
+    const char* name = scancode > 0 ? SDL_GetScancodeName((SDL_Scancode)scancode) : NULL;
+    keymap_write(names[action], name && name[0] ? name : "None");
+    m->s.assist_key_bind[action] = scancode;
 }
 
 // ---- SNES config.ini [GamepadMap] bridge -----------------------------------
@@ -461,7 +502,12 @@ static const char* const kSnesGamepadDefaultControls[LNG_SNES_PAD_BUTTON_COUNT] 
 };
 
 static const char* snes_gamepad_config_key(int player) {
-    return player == 1 ? "ControlsP2" : "Controls";
+    /* [GamepadMap] Controls, ControlsP2, ... ControlsP8: one line per seat,
+     * multitap seats included (snesrecomp's desktop host reads them all). */
+    static char keys[LNG_MAX_PLAYERS][16];
+    if (player <= 0 || player >= LNG_MAX_PLAYERS) return "Controls";
+    snprintf(keys[player], sizeof(keys[player]), "ControlsP%d", player + 1);
+    return keys[player];
 }
 
 static char* trim_token(char* s) {
@@ -536,7 +582,7 @@ static void snes_gamepad_read_controls(int player,
 
 static void snes_gamepad_write_config_order(int player,
                                             char controls[LNG_SNES_PAD_BUTTON_COUNT][48]) {
-    char value[768] = {};
+    char value[768] = {0};
     for (int i = 0; i < LNG_SNES_PAD_BUTTON_COUNT; ++i) {
         if (i) strncat(value, ", ", sizeof(value) - strlen(value) - 1);
         strncat(value, controls[i], sizeof(value) - strlen(value) - 1);
@@ -619,7 +665,7 @@ static const char* snes_gamepad_token_for_capture(int kind, int code, int axis_d
 
 static int snes_gamepad_set_button(LauncherModel* m, int player, int b,
                                    int kind, int code, int axis_dir) {
-    if (!m || player < 0 || player > 1 || b < 0 || b >= LNG_SNES_PAD_BUTTON_COUNT)
+    if (!m || player < 0 || player >= LNG_MAX_PLAYERS || b < 0 || b >= LNG_SNES_PAD_BUTTON_COUNT)
         return 0;
     /* An empty token IS the store's unbound value (snes_gamepad_label draws
      * it as "(unbound)"), so a clear writes one rather than being refused. */
@@ -703,7 +749,7 @@ static int snes_profile_get(const char* guid, const char* key,
 
 int launcher_binds_snes_profile_exists(LauncherModel* m, int player) {
     char v[64];
-    if (!m || !is_snes_profile(m) || player < 1 || player > 2) return 0;
+    if (!m || !is_snes_profile(m) || player < 1 || player > LNG_MAX_PLAYERS) return 0;
     return snes_profile_get(m->s.player_gamepad_guid[player - 1], "Controls",
                             v, sizeof(v)) ||
            snes_profile_get(m->s.player_gamepad_guid[player - 1], "Name",
@@ -717,6 +763,20 @@ int launcher_binds_snes_profile_exists(LauncherModel* m, int player) {
  * source box where the device name belongs. The saved profile's Name is
  * preferred (it may be the player's own rename); otherwise the live device is
  * asked, and failing both the slot keeps whatever it had. */
+/* Live device `instance` (SDL id + 1) is still connected. */
+static int snes_pad_live(const LauncherPad* pads, int pad_count, uint32_t instance) {
+    if (!instance) return 0;
+    for (int i = 0; i < pad_count; ++i) if (pads[i].id + 1 == instance) return 1;
+    return 0;
+}
+/* Another gamepad seat already holds this physical pad. */
+static int snes_pad_claimed(const LauncherModel* m, int seats, int p, const LauncherPad* pad) {
+    for (int o = 0; o < seats; ++o)
+        if (o != p && m->s.player_src[o] == 2 && m->s.player_gamepad_instance[o] == pad->id + 1)
+            return 1;
+    return 0;
+}
+
 void launcher_binds_hydrate_snes_pad_names(LauncherModel* m,
                                            const LauncherPad* pads,
                                            int pad_count) {
@@ -730,16 +790,11 @@ void launcher_binds_hydrate_snes_pad_names(LauncherModel* m,
      * actually play with -- and apply that pad's saved profile, or the console
      * default deadzone when it has none. One shot: once a GUID is set this
      * whole block is skipped, so it never fights a later choice. */
-    for (int p = 0; p < 2 && pads; ++p) {
+    const int seats = m->player_count < LNG_MAX_PLAYERS ? m->player_count : LNG_MAX_PLAYERS;
+    for (int p = 0; p < seats && pads; ++p) {
         if (m->s.player_src[p] != 2 || m->s.player_gamepad_guid[p][0]) continue;
         for (int i = 0; i < pad_count; ++i) {
-            int taken = 0;
-            if (!pads[i].guid[0]) continue;
-            for (int o = 0; o < 2; ++o)
-                if (o != p && m->s.player_src[o] == 2 &&
-                    !strcmp(m->s.player_gamepad_guid[o], pads[i].guid))
-                    taken = 1;
-            if (taken) continue;
+            if (!pads[i].guid[0] || snes_pad_claimed(m, seats, p, &pads[i])) continue;
             launcher_model_set_source(m, p, 2, pads[i].id, pads[i].name,
                                       pads[i].guid);
             launcher_binds_apply_snes_pad_profile(m, p + 1);
@@ -747,7 +802,25 @@ void launcher_binds_hydrate_snes_pad_names(LauncherModel* m,
         }
     }
 
-    for (int p = 0; p < 2; ++p) {
+    /* Identical controllers (two DualSense) share a GUID, so the GUID alone
+     * cannot tell which physical pad a seat uses. Bind each gamepad seat that
+     * names a GUID to one live device of that model no other seat holds; the
+     * picker lists and claims devices by this binding. Instance ids are not
+     * saved, so this re-binds after every launch or reconnect. */
+    for (int p = 0; p < seats && pads; ++p) {
+        const char* guid = m->s.player_gamepad_guid[p];
+        if (m->s.player_src[p] != 2 || !guid[0]) continue;
+        if (snes_pad_live(pads, pad_count, m->s.player_gamepad_instance[p])) continue;
+        m->s.player_gamepad_instance[p] = 0;
+        for (int i = 0; i < pad_count; ++i) {
+            if (strcmp(pads[i].guid, guid) || snes_pad_claimed(m, seats, p, &pads[i])) continue;
+            m->s.player_gamepad_instance[p] = pads[i].id + 1;
+            m->player_pad_id[p] = pads[i].id;
+            break;
+        }
+    }
+
+    for (int p = 0; p < seats; ++p) {
         const char* guid = m->s.player_gamepad_guid[p];
         char name[64];
         if (m->s.player_src[p] != 2 || !guid[0]) continue;
@@ -775,7 +848,7 @@ void launcher_binds_save_snes_gamepad(LauncherModel* m, int player) {
     const char* guid;
     int dz;
 
-    if (!m || !is_snes_profile(m) || player < 1 || player > 2) return;
+    if (!m || !is_snes_profile(m) || player < 1 || player > LNG_MAX_PLAYERS) return;
     guid = m->s.player_gamepad_guid[player - 1];
     if (!guid[0]) return;                 /* nothing to key the profile on */
     snes_profile_section(guid, sect, sizeof(sect));
@@ -804,7 +877,7 @@ void launcher_binds_rename_snes_gamepad(LauncherModel* m, int player,
                                         const char* name) {
     char sect[96];
     const char* guid;
-    if (!m || !is_snes_profile(m) || player < 1 || player > 2) return;
+    if (!m || !is_snes_profile(m) || player < 1 || player > LNG_MAX_PLAYERS) return;
     guid = m->s.player_gamepad_guid[player - 1];
     if (!guid[0] || !name || !name[0]) return;
     snes_profile_section(guid, sect, sizeof(sect));
@@ -819,7 +892,7 @@ void launcher_binds_rename_snes_gamepad(LauncherModel* m, int player,
 void launcher_binds_delete_snes_gamepad(LauncherModel* m, int player) {
     char sect[96];
     const char* guid;
-    if (!m || !is_snes_profile(m) || player < 1 || player > 2) return;
+    if (!m || !is_snes_profile(m) || player < 1 || player > LNG_MAX_PLAYERS) return;
     guid = m->s.player_gamepad_guid[player - 1];
     if (!guid[0]) return;
     snes_profile_section(guid, sect, sizeof(sect));
@@ -842,7 +915,7 @@ void launcher_binds_apply_snes_pad_profile(LauncherModel* m, int player) {
     char dzs[16];
     const char* guid;
 
-    if (!m || !is_snes_profile(m) || player < 1 || player > 2) return;
+    if (!m || !is_snes_profile(m) || player < 1 || player > LNG_MAX_PLAYERS) return;
     guid = m->s.player_gamepad_guid[player - 1];
     if (!guid[0]) return;
 
@@ -1004,7 +1077,9 @@ void launcher_binds_set_button(LauncherModel* m, int player, int b, int scancode
                  scancode_label((SDL_Scancode)scancode));
         return;
     }
-    if (player < 1 || player > 2) return;
+    /* Genesis keeps its two-player store; the generic keybinds.ini (SNES and
+     * friends) has sections for every multitap seat. */
+    if (player < 1 || player > (is_genesis_profile(m) ? 2 : KEYBINDS_MAX_PLAYERS)) return;
     if (is_genesis_profile(m)) {
         if (b < 0 || b >= LNG_GENESIS_PAD_BUTTON_COUNT) return;
         rui_genesis_binds_set_key(genesis_binds_file_path(), player - 1, b, scancode);
@@ -1043,6 +1118,13 @@ void launcher_binds_set_field(LauncherModel* m, int player, int b, int slot,
 
 void launcher_binds_set_pad_button(LauncherModel* m, int player, int b,
                                    int kind, int code, int axis_dir) {
+    if (is_gba_profile(m)) {
+        if(player!=1 || b<0 || b>=10 || !m->s.player_gamepad_guid[0][0])return;
+        const char* path=gba_input_ini_path();
+        rui_pad_binds_set(&kRuiGbaPadSpec,path,m->s.player_gamepad_guid[0],b,kind,code,axis_dir);
+        rui_pad_binds_remember(&kRuiGbaPadSpec,path,m->s.player_gamepad_guid[0],m->player_pad_name[0],-1);
+        launcher_binds_refresh(m);return;
+    }
     if (player < 1 || player > LNG_MAX_PLAYERS) return;
     if (is_psx_profile(m)) {
         if (b < 0 || b >= LNG_PSX_PAD_BUTTON_COUNT) return;
@@ -1081,7 +1163,7 @@ void launcher_binds_set_pad_button(LauncherModel* m, int player, int b,
         return;
     }
     if (is_snes_profile(m)) {
-        if (player > 2) return;
+        if (player < 1 || player > LNG_MAX_PLAYERS) return;
         (void)snes_gamepad_set_button(m, player - 1, b, kind, code, axis_dir);
         return;
     }
@@ -1233,7 +1315,7 @@ void launcher_binds_sync_psx_pad_sources(LauncherModel* m,
             } else {
                 const int known = rui_psx_pad_binds_known_count(path);
                 for (int i = 0; i < known; ++i) {
-                    char guid[40] = {}, name[64] = {};
+                    char guid[40] = {0}, name[64] = {0};
                     if (!rui_psx_pad_binds_known_at(path, i, guid, (int)sizeof(guid),
                                                     name, (int)sizeof(name)))
                         continue;
@@ -1264,7 +1346,7 @@ void launcher_binds_sync_psx_pad_sources(LauncherModel* m,
             m->player_pad_id[p] = pads[live].id;
             if (custom) {
                 // Keep the user's rename in the model / dropdown.
-                char reg[64] = {};
+                char reg[64] = {0};
                 rui_psx_pad_binds_name(path, guid, reg, (int)sizeof(reg));
                 if (reg[0])
                     copy_str(m->player_pad_name[p],
@@ -1282,7 +1364,7 @@ void launcher_binds_sync_psx_pad_sources(LauncherModel* m,
         }
 
         // Disconnected: registry name, else a non-generic fallback.
-        char reg[64] = {};
+        char reg[64] = {0};
         rui_psx_pad_binds_name(path, guid, reg, (int)sizeof(reg));
         if (reg[0] && strcmp(reg, "Gamepad") != 0)
             copy_str(m->player_pad_name[p], sizeof(m->player_pad_name[p]), reg);
@@ -1302,7 +1384,7 @@ void launcher_binds_apply_psx_pad_profile(LauncherModel* m, int player) {
     const char* guid = m->s.player_gamepad_guid[player];
     if (!guid[0]) return;
     const char* path = psx_input_ini_path();
-    char name[64] = {};
+    char name[64] = {0};
     rui_psx_pad_binds_name(path, guid, name, (int)sizeof(name));
     if (name[0] && strcmp(name, "Gamepad") != 0)
         copy_str(m->player_pad_name[player], sizeof(m->player_pad_name[player]),
@@ -1449,6 +1531,10 @@ int launcher_binds_psx_name_is_custom(const char* guid) {
 }
 
 void launcher_binds_reset_player(LauncherModel* m, int player) {
+    if(is_gba_profile(m) && player==1 && m->s.player_src[0]==2) {
+        rui_pad_binds_reset(&kRuiGbaPadSpec,gba_input_ini_path(),m->s.player_gamepad_guid[0]);
+        launcher_binds_refresh(m);return;
+    }
     if (is_n64_profile(m)) {
         if (player < 1 || player > LNG_MAX_PLAYERS) return;
         // Reset the half the page is showing, and only that half: a player on
@@ -1482,7 +1568,9 @@ void launcher_binds_reset_player(LauncherModel* m, int player) {
         reload_player_display(m, player);
         return;
     }
-    if (player < 1 || player > 2) return;
+    /* Genesis keeps its two-player store; the generic keybinds.ini (SNES and
+     * friends) has sections for every multitap seat. */
+    if (player < 1 || player > (is_genesis_profile(m) ? 2 : KEYBINDS_MAX_PLAYERS)) return;
     if (is_genesis_profile(m)) {
         rui_genesis_binds_reset(genesis_binds_file_path(), player - 1);
         reload_player_display(m, player);

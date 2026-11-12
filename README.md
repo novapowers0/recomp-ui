@@ -1,5 +1,7 @@
 # recomp-ui
 
+PSX controller startup uses [automatic controller mode](docs/PSX_CONTROLLER_MODE.md).
+
 > ℹ️ **Note from mstan:** This repo and I are now part of [RetroPortingToolkit](https://retroportingtoolkit.com/). I remain a primary maintainer of recomp-ui alongside the team. [More info](https://1379.tech/forming-a-collective-retro-porting-toolkit/).
 
 A shared, **console-agnostic launcher and in-game settings UI** for static-
@@ -20,6 +22,64 @@ binary core**:
   verification, memory cards, deep PSX video settings.
 
 ---
+
+## Host integration helpers
+
+### Host launch options and game version
+
+Hosts can adopt the optional C helpers before their own argument parser:
+
+```c
+int launcher_mode = recomp_launcher_parse_cli_args(&argc, argv);
+/* Load the host's saved settings as usual. */
+recomp_launcher_set_game_version("v1.2.3");
+if (!recomp_launcher_cli_should_skip(launcher_mode, settings.skip_launcher)) {
+    /* Call recomp_launcher_run_window(...) as usual. */
+}
+```
+
+`--no-launcher` and `--skip-launcher` request one direct boot; `--launcher`
+requests the launcher even when the saved preference skips it. The last
+launcher switch wins. The helper removes these switches from argv, preserves
+other arguments, and stops at `--`. It never changes the saved skip setting.
+The host retains its normal required-media checks and direct-boot mod setup.
+These switches require host adoption; linking recomp-ui alone does not parse
+an executable's arguments.
+
+The version setter copies up to 127 bytes and displays the supplied game
+version below the launcher title/platform. NULL clears it; existing hosts that
+do not supply a version keep their current presentation. This metadata is
+process-local and is not a setting or a netplay compatibility identity.
+
+### File-path TEXT options
+
+Existing provider and option structs retain their layouts. A host/provider can
+opt a TEXT option into Browse/Clear with the fixed V1 metadata extension:
+
+```c
+RecompLauncherCModTextPathV1 path = {0};
+snprintf(path.filter_description, sizeof(path.filter_description), "Seed patch");
+path.pattern_count = 1;
+snprintf(path.patterns[0], sizeof(path.patterns[0]), "*.apsm");
+int registered = recomp_launcher_register_mod_text_path_v1(
+    &provider, "example.randomizer", "randomizer", "seed", &path);
+/* Open the launcher, then unregister before destroying/reusing provider. */
+recomp_launcher_unregister_mod_text_paths(&provider);
+```
+
+Check the registration result. Package-level options use NULL/empty feature
+IDs. IDs, filter description and up to eight patterns are copied; the provider
+pointer is an identity key borrowed for the registration's lifetime. Register
+NULL metadata to remove one entry. Call registration/query functions on the UI
+thread or while the launcher is closed.
+
+Browse uses the existing native/in-app picker and writes through the ordinary
+package or feature `set_option` callback; cancel writes nothing. Clear submits
+an empty value. Providers retain validation and saved-path ownership, with no
+fixed-ROM identity requirement added. Unregistered TEXT options keep their
+input-only control. The existing `RECOMP_LAUNCHER_MOD_VALUE_MAX` capacity still
+applies: overlong selections are rejected rather than truncated to another
+filename.
 
 ## Architecture: composition + inheritance
 
@@ -61,7 +121,7 @@ recomp_target_launcher_ui(my-game-runtime
     CONSOLE psx                                  # required: psx/snes/nds/n64/nes/...
     BOXART ${CMAKE_SOURCE_DIR}/art/boxart.tga   # optional: game box art
     PAD    ${CMAKE_SOURCE_DIR}/art/pad.tga       # optional: per-console controller image
-    BRAND  ${CMAKE_SOURCE_DIR}/art/brand.tga)    # optional: per-console top-left mark
+    BRAND  ${CMAKE_SOURCE_DIR}/art/brand.tga)    # optional: game top-left mark
 ```
 
 `recomp_ui.cmake` is fully self-contained: it bundles Dear ImGui, crc32/sha256/
@@ -120,6 +180,31 @@ int rc = recomp_launcher_run_window("My Game — Launcher", &io, &gi,
 // rc: 0 = LAUNCH (boot out_rom with the edited io), 1 = QUIT, 2 = UNAVAILABLE
 #endif
 ```
+
+#### Telling players which ROM they picked
+
+A bare fingerprint can only say "ROM not recognized". List the dumps players
+actually confuse with yours in `gi.rom_revisions` and the launcher names them:
+
+```c
+static const RecompLauncherCRomRevision kRevisions[] = {
+    /* label, sha256, sha1, crc32, supported, note */
+    {"My Game (USA) (Rev 1)", "b8f7...", NULL, NULL, 1, NULL},
+    {"My Game (USA)", NULL, "449a...", "1033EBA4", 0,
+     "This is the original release; this build needs Rev 1."},
+};
+gi.rom_revisions = kRevisions; gi.num_rom_revisions = 2;
+gi.rom_help = "Headered (.smc) and headerless (.sfc) dumps both work.";
+```
+
+Digests cover the image after any copier/iNES header. A supported entry
+verifies the ROM (alongside `expected_crc` / `known_sha256` / `known_sha1_hex`);
+any other match shows "Wrong ROM: This is My Game (USA). My Game needs My Game
+(USA) (Rev 1) (SHA-256 ...)". A file nothing matches shows an optional
+`gi.rom_describe` host probe's description (e.g. the internal header's title
+and version) and the requirement. ZIP/7z/RAR/gzip archives and
+unreadable files get their own message, and **Copy details** puts the file's
+SHA-256/SHA-1/CRC32 and the requirement on the clipboard for bug reports.
 
 For the SNES profile, this entry point loads launcher preferences from
 `gi.config_path` (default `config.ini`) and saves edited settings on **Play,
@@ -328,6 +413,16 @@ in-session commits keep their existing paths; commit-only hosts never
 auto-prepare. A host can prime a validated warm ticket before opening the UI
 so an ordinary warm launcher does not need a preparation screen at all.
 
+When `RECOMP_LAUNCHER_HAS_MOD_PREPARATION_PROGRESS` is defined, a worker-safe
+provider may also supply `commit_with_progress`. It receives a report callback
+and context; pass a fraction in 0..1 (or a negative value for an indefinite bar)
+and a short preparation message. The launcher copies progress without accessing
+the provider on the UI thread. A zero report result requests cancellation.
+Check it between bounded work units and before publishing output bindings, and
+retain the previous verified cache on failure or cancellation. Cancel and close
+join the owned worker; cancellation always suppresses launch. Legacy providers
+keep their existing callback and completion behavior.
+
 Hosted-lobby, LAN, and direct netplay launches never call the normal `commit()`.
 If supplied, `commit_netplay()` should clear any in-session mod plan without
 changing the user's persisted offline selection. If it is `NULL`, recomp-ui
@@ -471,6 +566,10 @@ snesrecomp `docs/RECOMP_NET.md` → "Soft-return rematch checklist".
   widescreen 16:9 with an optional "extra cells / side" stepper (Genesis),
   texture filtering, antialiasing (Off/2×/4×/8×), screen model, frame
   interpolation, and more — each shown only when the console exposes it.
+  Which of these may be Settings rows at all is fixed for every console by
+  [docs/SETTINGS_STANDARD.md](docs/SETTINGS_STANDARD.md): Settings is PC/system
+  only, picture/sound/play changes are mods, and that file tracks each
+  console's remaining migration items.
 - **Save** — SRAM Import/Clear (with `.bak` backup) or PS1 memory cards (per-slot
   enable, Browse / New-formats-a-blank-card, real block-usage grid via the host
   `memcard_inspect` callback).
@@ -583,7 +682,7 @@ recomp_target_launcher_ui(game-target
 | `BOXART <path>` | Optional per-game TGA copied next to the executable. |
 | `BOXART_NAME <name>` | Optional destination basename when several targets share one output directory. Pair it with `GameInfo.boxart_path`. |
 | `PAD <path>` | Optional controller-art override staged as `assets/img/pad.tga`. |
-| `BRAND <path>` | Optional top-left brand override staged as `assets/img/brand_mark.tga`. |
+| `BRAND <path>` | Optional top-left game mark staged as `assets/img/brand_game.tga`; it wins over the console profile's own mark. |
 | `HOST_IMGUI` + `IMGUI_DIR <path>` | Reuse Dear ImGui already compiled by the host, avoiding duplicate core/backend symbols. `IMGUI_DIR` must contain `imgui.h` and the backend headers. |
 
 `RECOMP_UI_HOST_IMGUI=ON` plus `RECOMP_UI_HOST_IMGUI_INCLUDE=<path>` remains
@@ -626,7 +725,13 @@ LNG_VARIANT=genesis ./build/recomp-ui-launcher
 [`src/launcher_debug.h`](src/launcher_debug.h)).
 
 Requires SDL3 (`find_package(SDL3 CONFIG)`) by default, OpenGL, and a C++17
-compiler. Configure with `-DSNESRECOMP_SDL_BACKEND=SDL2` to exercise the
+compiler.
+
+On Windows, `recomp_target_launcher_ui()` embeds `windows/recomp_utf8.manifest`
+in the executable (unless the host already embeds a manifest). It sets the
+process code page to UTF-8, so the UTF-8 paths the pickers return open through
+`fopen` and `std::filesystem` alike, including folders such as `Recompilé`.
+Windows older than 10 1903 ignores it, and the launcher logs a warning. Configure with `-DSNESRECOMP_SDL_BACKEND=SDL2` to exercise the
 supported SDL2 fallback.
 
 ---

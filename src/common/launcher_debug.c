@@ -126,7 +126,7 @@ static void synth_click(LauncherPlatform* p, float x, float y) {
     SDL_PushEvent(&e);
 }
 
-static void synth_key(SDL_Keycode key) {
+static void synth_key(LauncherPlatform* p, SDL_Keycode key) {
     SDL_Scancode sc = SDL_GetScancodeFromKey(key
 #if defined(LNG_SDL3)
         , NULL
@@ -136,10 +136,13 @@ static void synth_key(SDL_Keycode key) {
     SDL_zero(e);
     e.type = SDL_EVENT_KEY_DOWN;
 #if defined(LNG_SDL3)
+    /* ImGui's SDL3 backend drops key events for no known window. */
+    e.key.windowID = p && p->window ? SDL_GetWindowID(p->window) : 0;
     e.key.key = key;
     e.key.scancode = sc;
     e.key.down = true;
 #else
+    e.key.windowID = p && p->window ? SDL_GetWindowID(p->window) : 0;
     e.key.keysym.sym = key;
     e.key.keysym.scancode = sc;
     e.key.state = SDL_PRESSED;
@@ -152,6 +155,22 @@ static void synth_key(SDL_Keycode key) {
     e.key.state = SDL_RELEASED;
 #endif
     SDL_PushEvent(&e);
+}
+
+static void synth_pad_button(int button) {
+    if (button < 0 || button >= 32) return;
+    SDL_Event e; SDL_zero(e);
+    e.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+    LNG_EVGBTNWHICH(e) = 42; LNG_EVGBTN(e) = (Uint8)button;
+    SDL_PushEvent(&e);
+    e.type = SDL_EVENT_GAMEPAD_BUTTON_UP; SDL_PushEvent(&e);
+}
+static void synth_pad_axis(int axis, int value) {
+    if (axis < 0 || axis > 5 || value < -32768 || value > 32767) return;
+    SDL_Event e; SDL_zero(e);
+    e.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+    LNG_EVGAXISWHICH(e) = 42; LNG_EVGAXIS(e) = (Uint8)axis;
+    LNG_EVGAXISVAL(e) = (Sint16)value; SDL_PushEvent(&e);
 }
 
 static bool launcher_debug_step_impl(LauncherPlatform* p, LauncherModel* m) {
@@ -184,6 +203,7 @@ static bool launcher_debug_step_impl(LauncherPlatform* p, LauncherModel* m) {
         else if (strcmp(v, "controller") == 0) launcher_model_set_view(m, LNG_VIEW_CONTROLLER);
         else if (strcmp(v, "assist_tools") == 0) launcher_model_set_view(m, LNG_VIEW_ASSIST_TOOLS);
         else if (strcmp(v, "credits") == 0) launcher_model_set_view(m, LNG_VIEW_CREDITS);
+        else if (strcmp(v, "mods") == 0) launcher_model_set_view(m, LNG_VIEW_MODS);
         /* The LAN-vs-online fork. Reachable only by clicking NETPLAY on the
          * dashboard, which made it the one netplay page a screenshot script
          * could not open. */
@@ -194,6 +214,20 @@ static bool launcher_debug_step_impl(LauncherPlatform* p, LauncherModel* m) {
             launcher_model_set_view(m, LNG_VIEW_NETPLAY);
         }
         else if (strcmp(v, "lobby") == 0) launcher_model_set_view(m, LNG_VIEW_LOBBY);
+    } else if (strncmp(c, "mod-select:", 11) == 0) {
+        m->mod_selected = atoi(c + 11);
+    } else if (strncmp(c, "resource-import:", 16) == 0) {
+        char resource[RECOMP_LAUNCHER_MOD_ID_MAX];
+        const char* path = strchr(c + 16, ':');
+        RecompLauncherCModFeature feature;
+        if (path && (size_t)(path - (c + 16)) < sizeof resource && m->mods &&
+            m->mods->feature_get && m->mods->feature_get(m->mods->ctx, m->mod_selected, &feature)) {
+            memcpy(resource, c + 16, (size_t)(path - (c + 16)));
+            resource[path - (c + 16)] = 0;
+            launcher_model_import_mod_resource(m, feature.package_id, feature.id, resource, path + 1);
+        }
+    } else if (strcmp(c, "wait-ready") == 0) {
+        if (m->setup_preparing) --g_cmd_index;
     } else if (strncmp(c, "player:", 7) == 0) {
         // Select which player the Controller view configures. Clamp to the
         // launcher's real player range (N64 profiles run up to 4) instead of
@@ -204,8 +238,39 @@ static bool launcher_debug_step_impl(LauncherPlatform* p, LauncherModel* m) {
         m->cfg_player = pl;
     } else if (strncmp(c, "capbtn:", 7) == 0) {
         launcher_model_begin_capture(m, atoi(c + 7));   // rebind a player button (generic spec index)
+    } else if (strncmp(c, "cappad:", 7) == 0) {
+        launcher_model_begin_pad_capture(m, atoi(c + 7));
+    } else if (strncmp(c, "padbutton:", 10) == 0) {
+        synth_pad_button(atoi(c + 10));
+    } else if (strncmp(c, "padaxis:", 8) == 0) {
+        int axis, value;
+        if (sscanf(c + 8, "%d,%d", &axis, &value) == 2) synth_pad_axis(axis, value);
     } else if (strncmp(c, "caphk:", 6) == 0) {
         launcher_model_begin_hk_capture(m, (LngHotkey)atoi(c + 6)); // rebind a hotkey
+    } else if (strncmp(c, "capassist:", 10) == 0) {
+        int action = 0, pad = 0;
+        if (sscanf(c + 10, "%d,%d", &action, &pad) == 2)
+            launcher_model_begin_assist_capture(m, action, pad != 0);
+    } else if (strncmp(c, "padbutton:", 10) == 0) {
+        SDL_Event event;
+        SDL_zero(event);
+        event.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+        LNG_EVGBTN(event) = (Uint8)atoi(c + 10);
+        LNG_EVGBTNWHICH(event) = 1;
+        SDL_PushEvent(&event);
+        event.type = SDL_EVENT_GAMEPAD_BUTTON_UP;
+        SDL_PushEvent(&event);
+    } else if (strncmp(c, "padaxis:", 8) == 0) {
+        int axis = 0, value = 0;
+        if (sscanf(c + 8, "%d,%d", &axis, &value) == 2) {
+            SDL_Event event;
+            SDL_zero(event);
+            event.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+            LNG_EVGAXIS(event) = (Uint8)axis;
+            LNG_EVGAXISVAL(event) = (Sint16)value;
+            LNG_EVGAXISWHICH(event) = 1;
+            SDL_PushEvent(&event);
+        }
     } else if (strncmp(c, "size:", 5) == 0) {
         int w = 0, h = 0;
         if (sscanf(c + 5, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
@@ -216,10 +281,10 @@ static bool launcher_debug_step_impl(LauncherPlatform* p, LauncherModel* m) {
         float x = 0, y = 0;
         if (sscanf(c + 6, "%f,%f", &x, &y) == 2) synth_click(p, x, y);
     } else if (strncmp(c, "key:", 4) == 0) {
-        if (strcmp(c + 4, "escape") == 0) synth_key(SDLK_ESCAPE);
+        if (strcmp(c + 4, "escape") == 0) synth_key(p, SDLK_ESCAPE);
         else {
             SDL_Keycode k = SDL_GetKeyFromName(c + 4);
-            if (k != SDLK_UNKNOWN) synth_key(k);
+            if (k != SDLK_UNKNOWN) synth_key(p, k);
             else fprintf(stderr, "[dbg] unknown key: %s\n", c + 4);
         }
     } else if (strncmp(c, "text:", 5) == 0) {
@@ -233,6 +298,7 @@ static bool launcher_debug_step_impl(LauncherPlatform* p, LauncherModel* m) {
         e.text.text = s_text;
         e.text.windowID = SDL_GetWindowID(p->window);
 #else
+        e.text.windowID = p && p->window ? SDL_GetWindowID(p->window) : 0;
         snprintf(e.text.text, sizeof(e.text.text), "%s", s_text);
 #endif
         SDL_PushEvent(&e);
